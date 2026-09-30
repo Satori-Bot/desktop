@@ -3,12 +3,17 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  quality:
+    uses: ./.github/workflows/ci.yml
+
   publish:
+    needs: quality
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -38,3 +43,5 @@ jobs:
       - run: python -m build
       - run: python -m twine check dist/*
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

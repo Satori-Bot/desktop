@@ -57,7 +57,11 @@ FRP is currently externally managed: the app generates configuration and connect
 
 ## Documentation
 
-User guides and client setup live in the documentation repository:
+User guides and client setup are published at:
+
+https://coding-tools-mcp.github.io/docs/
+
+Documentation source:
 
 https://github.com/coding-tools-mcp/docs
 
