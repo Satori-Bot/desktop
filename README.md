@@ -1,70 +1,66 @@
-# MCP 桌面客户端
+# Coding Tools MCP Desktop
 
-这是 `coding-tools-mcp` 的 Python 桌面客户端 MVP，核心目标是让研发同学用一个中文界面完成：
+Desktop application for running and managing [Coding Tools MCP](https://github.com/xyTom/coding-tools-mcp).
 
-- 管理多个 Workspace
-- 配置公网暴露地址，当前支持外部托管的 FRP 和由客户端管理的 Cloudflare
-- 配置 OAuth / Bearer / NoAuth
-- 启动和停止本地 MCP 运行时
-- 查看运行日志和当前入口地址
-- 直接复制 ChatGPT 自定义 MCP 应用需要填写的核心字段
+The app provides a GUI for:
 
-## 运行
+- managing multiple workspaces
+- starting and stopping the local Coding Tools MCP runtime
+- configuring OAuth, bearer-token, or no-auth modes
+- exposing a runtime through Cloudflare Tunnel or an externally managed FRP client
+- checking runtime/tunnel health and logs
+- copying connection details for MCP clients
+- switching between English and Simplified Chinese
+
+## Install from source
+
+Requires Python 3.11+.
 
 ```bash
-python -m pip install -e ".[desktop]"
+python -m pip install -e .
 coding-tools-mcp-desktop
 ```
 
-也可以继续从源码直接运行：
+The desktop package depends on `coding-tools-mcp`, so a normal installation also installs the core runtime. The app can also launch the runtime through `uvx coding-tools-mcp` when `uvx` is available.
+
+## Development
 
 ```bash
-python apps/desktop-client/main.py
+python -m pip install -e ".[dev]"
+make test
+make lint
+make i18n-check
+python -m build
 ```
 
-## 依赖
-
-- Python 3.11+
-- PySide6
-- psutil
-- `uvx` 或 `coding-tools-mcp` 已在 PATH 中可用
-
-## 语言
-
-客户端首次启动时跟随系统语言，目前内置：
-
-- English
-- 简体中文
-
-可以在左侧语言选择框中即时切换，选择结果会通过 Qt 设置持久化。系统语言不受支持时默认使用英文。
-
-更新界面文本后，使用 PySide6 Linguist 工具刷新并检查翻译目录：
+To refresh the Simplified Chinese Qt catalog after changing user-facing strings:
 
 ```bash
-make desktop-i18n-update
-make desktop-i18n-release
-python scripts/check_desktop_i18n.py
+make i18n-update
+make i18n-release
+make i18n-check
 ```
 
-## ChatGPT 接入
+## Runtime boundary
 
-当认证方式选择 `oauth` 后，界面里会直接展示并支持复制：
+This repository owns only the desktop application. Runtime behavior, MCP protocol support, tool schemas, security policy, and the `coding-tools-mcp` executable are owned by the core repository:
 
-- 连接地址
-- OAuth 客户端 ID
-- OAuth 客户端密钥
-- 授权口令
+https://github.com/xyTom/coding-tools-mcp
 
-如果你使用 FRP，请把 Workspace、本地端口、FRP 子域名和服务器域名配好，复制界面生成的 FRP 片段，并在同一台主机上的 `frpc` 配置中应用它。桌面客户端只管理本地 MCP 运行时，不会替你启动或重载 `frpc`；界面显示的 FRP 公网地址也需要外部 `frpc` 正常运行后才可访问。
+The desktop app invokes the core runtime as an external executable. It does not import or duplicate the core server implementation.
 
-如果你使用 Cloudflare，有两种模式：
+## Remote access
 
-- 临时隧道：使用 `cloudflared tunnel --url`，启动后自动分配一个 `trycloudflare.com` 公网地址
-- 固定域名：使用 `Tunnel Token` 启动命名隧道，并在界面里填写固定公网地址
+Cloudflare quick tunnels are managed directly by the app. Named Cloudflare tunnels require a tunnel token and an already configured hostname.
 
-## 当前限制
+FRP is currently externally managed: the app generates configuration and connection details, but it does not start or reload `frpc`.
 
-- FRP 当前是外部托管模式；客户端只生成配置片段，不管理 `frpc` 进程
-- `Ngrok`、`Dev Tunnel` 还没有实现真实隧道启动能力
-- Cloudflare 命名隧道模式依赖你提前在 Cloudflare 仪表盘里配置好 tunnel 和 hostname
-- Cloudflare 命名隧道模式下，本地服务地址需要和 Cloudflare Tunnel 的 ingress 目标一致，通常是 `http://127.0.0.1:<本地端口>`
+## Documentation
+
+User guides and client setup live in the documentation repository:
+
+https://github.com/coding-tools-mcp/docs
+
+## License
+
+Apache-2.0.

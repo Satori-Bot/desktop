@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check mcp_desktop_client tests scripts
+      - run: python -m unittest discover -s tests -p "test_*.py"
+      - run: python scripts/check_desktop_i18n.py
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - name: Verify wheel boundary
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheels = glob.glob("dist/*.whl")
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one wheel, found {wheels}")
+
+          with zipfile.ZipFile(wheels[0]) as archive:
+              names = set(archive.namelist())
+              required = {
+                  "mcp_desktop_client/app.py",
+                  "mcp_desktop_client/locales/app_zh_CN.qm",
+                  "mcp_desktop_client/locales/app_zh_CN.ts",
+              }
+              missing = sorted(required - names)
+              if missing:
+                  raise SystemExit(f"wheel is missing: {missing}")
+              if any(name.startswith("coding_tools_mcp/") for name in names):
+                  raise SystemExit("desktop wheel must not bundle the core runtime")
+
+              entry_points = archive.read(
+                  next(name for name in names if name.endswith("entry_points.txt"))
+              ).decode()
+              expected = "coding-tools-mcp-desktop = mcp_desktop_client.app:main"
+              if expected not in entry_points:
+                  raise SystemExit(f"wheel entry point is missing: {expected}")
+          PY

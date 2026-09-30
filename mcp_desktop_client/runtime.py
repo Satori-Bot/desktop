@@ -7,7 +7,6 @@ import shlex
 import shutil
 import socket
 import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -284,7 +283,6 @@ class RuntimeManager:
             env["CODING_TOOLS_MCP_SERVER_URL"] = server_url
         else:
             env.pop("CODING_TOOLS_MCP_SERVER_URL", None)
-        self._configure_pythonpath_for_local_repo(command, env)
         args = command + self._runtime_args(profile, env)
 
         log_dir = log_dir_for_profile(profile.id)
@@ -535,14 +533,10 @@ class RuntimeManager:
             return ["coding-tools-mcp"]
         if shutil.which("uvx"):
             return ["uvx", "coding-tools-mcp"]
-
-        repo_root = Path(__file__).resolve().parents[3]
-        if (repo_root / "coding_tools_mcp").exists():
-            return [sys.executable, "-m", "coding_tools_mcp"]
         raise RuntimeError(
             tr(
                 "RuntimeManager",
-                "Could not find uvx, coding-tools-mcp, or the local Python module entry point.",
+                "Could not find coding-tools-mcp or uvx. Install the Coding Tools MCP runtime first.",
             )
         )
 
@@ -575,13 +569,6 @@ class RuntimeManager:
         elif profile.auth.type == "noauth":
             env["CODING_TOOLS_MCP_AUTH_MODE"] = "noauth"
         return args
-
-    def _configure_pythonpath_for_local_repo(self, command: list[str], env: dict[str, str]) -> None:
-        if command[:2] != [sys.executable, "-m"]:
-            return
-        repo_root = str(Path(__file__).resolve().parents[3])
-        current = env.get("PYTHONPATH", "").strip()
-        env["PYTHONPATH"] = repo_root if not current else os.pathsep.join([repo_root, current])
 
     def _strip_matching_quotes(self, value: str) -> str:
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
