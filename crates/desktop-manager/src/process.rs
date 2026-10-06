@@ -214,6 +214,12 @@ impl ManagedProcess {
             .unwrap_or(false)
     }
     pub fn stop(&mut self) -> Result<()> {
+        // Do not discover a process tree from a PID that a foreign handler
+        // might already have reaped and allowed the OS to reuse.
+        #[cfg(unix)]
+        if !self.reaped {
+            let _ = self.exit_info();
+        }
         if !self.reaped {
             self.metrics();
             #[cfg(windows)]
