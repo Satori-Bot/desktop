@@ -248,6 +248,18 @@ def retain_feedback(evidence: dict, stage: str, observed: list, elapsed: float) 
         evidence["ui_feedback_history_clipped"] = True
 
 
+def matches_visible_notice(observed: list, text: str) -> bool:
+    """Require current rendered text, viewport containment, and unobscured painting."""
+    return any(
+        item.get("role") == "status"
+        and item.get("renderedText", "").strip() == text
+        and item.get("inViewport") is True
+        and item.get("painted") is True
+        and item.get("unobscured") is True
+        for item in observed
+    )
+
+
 def sha256(path: Path) -> str:
     result = hashlib.sha256()
     with path.open("rb") as stream:
@@ -477,13 +489,30 @@ def run(args) -> None:
                     return Array.from(document.querySelectorAll('[role="status"], [role="alert"]'))
                       .slice(0, 8).map(el => {
                         const r = el.getBoundingClientRect();
+                        const message = el.querySelector('.mantine-Alert-message') || el;
+                        const messageRect = message.getBoundingClientRect();
                         const style = getComputedStyle(el);
                         const region = el.closest('.operation-feedback');
                         const regionStyle = region ? getComputedStyle(region) : null;
                         const regionRect = region ? region.getBoundingClientRect() : null;
+                        let painted = message.getClientRects().length > 0 &&
+                          messageRect.width > 0 && messageRect.height > 0;
+                        for (let ancestor = message; ancestor; ancestor = ancestor.parentElement) {
+                          const ancestorStyle = getComputedStyle(ancestor);
+                          if (ancestorStyle.display === 'none' ||
+                              ancestorStyle.visibility !== 'visible' ||
+                              Number(ancestorStyle.opacity) === 0) painted = false;
+                        }
+                        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+                        const messageHit = document.elementFromPoint(
+                          messageRect.x + messageRect.width / 2, messageRect.y + messageRect.height / 2);
                         return {role: el.getAttribute('role'), text: (el.textContent || '').slice(0, 1200),
-                          renderedText: (el.innerText || '').slice(0, 1200),
+                          renderedText: (message.innerText || '').slice(0, 1200),
+                          painted, unobscured: hit !== null && el.contains(hit) &&
+                            messageHit !== null && message.contains(messageHit),
                           rect: {x: r.x, y: r.y, width: r.width, height: r.height},
+                          messageRect: {x: messageRect.x, y: messageRect.y,
+                            width: messageRect.width, height: messageRect.height},
                           display: style.display, visibility: style.visibility,
                           regionTop: regionStyle ? regionStyle.top : null,
                           regionRight: regionStyle ? regionStyle.right : null,
@@ -491,7 +520,9 @@ def run(args) -> None:
                           regionRect: regionRect ? {x: regionRect.x, y: regionRect.y,
                             width: regionRect.width, height: regionRect.height} : null,
                           inViewport: r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0 &&
-                            r.bottom <= innerHeight && r.right <= innerWidth};
+                            r.bottom <= innerHeight && r.right <= innerWidth &&
+                            messageRect.top >= 0 && messageRect.left >= 0 &&
+                            messageRect.bottom <= innerHeight && messageRect.right <= innerWidth};
                       });
                 """)
                 safe_observed = [
@@ -510,7 +541,7 @@ def run(args) -> None:
             def visible_notice(text, stage):
                 captured = False
 
-                def found(browser):
+                def found(_browser):
                     nonlocal captured
                     observed = record_feedback(stage)
                     if not captured and any(
@@ -519,21 +550,27 @@ def run(args) -> None:
                     ):
                         capture(f"native-{stage}-first-notice")
                         captured = True
-                    for item in browser.find_elements(
-                        By.CSS_SELECTOR, '[role="status"]'
-                    ):
-                        if not item.is_displayed() or text not in item.text:
-                            continue
-                        if browser.execute_script(
-                            """
-                            const r = arguments[0].getBoundingClientRect();
-                            return r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0 &&
-                              r.bottom <= innerHeight && r.right <= innerWidth;
-                        """,
-                            item,
-                        ):
-                            return True
-                    return False
+                        legacy = []
+                        try:
+                            for item in driver.find_elements(
+                                By.CSS_SELECTOR, '[role="status"]'
+                            )[:3]:
+                                legacy.append(
+                                    {
+                                        "is_displayed": item.is_displayed(),
+                                        "text": redact_diagnostic(item.text[:1200]),
+                                    }
+                                )
+                        except (WebDriverException, OSError, TransportError) as error:
+                            legacy.append({"error_type": type(error).__name__})
+                        evidence.setdefault("selenium_notice_diagnostics", {})[
+                            stage
+                        ] = legacy
+                        observed = record_feedback(stage)
+                    # Native screenshots and DOM measurements exposed a false-negative
+                    # in the legacy WebKitWebDriver display/text gate. Require live
+                    # rendering and hit testing; hidden/covered/offscreen text cannot pass.
+                    return matches_visible_notice(observed, text)
 
                 return wait.until(
                     found,
@@ -854,6 +891,32 @@ def run(args) -> None:
 
 
 class ProtocolHelpersTest(unittest.TestCase):
+    def test_notice_requires_rendered_unobscured_viewport_text(self):
+        visible = {
+            "role": "status",
+            "text": "Saved",
+            "renderedText": "Saved\n\n",
+            "inViewport": True,
+            "painted": True,
+            "unobscured": True,
+        }
+        self.assertTrue(matches_visible_notice([visible], "Saved"))
+        for reason, changes in {
+            "wrong role": {"role": "alert"},
+            "DOM-only text": {"renderedText": ""},
+            "wrong text": {"renderedText": "Not Saved"},
+            "clipped outside viewport": {"inViewport": False},
+            "hidden ancestor": {"painted": False},
+            "zero-opacity ancestor": {"painted": False},
+            "zero-opacity message child": {"painted": False},
+            "occluded center": {"unobscured": False},
+        }.items():
+            with self.subTest(reason=reason):
+                self.assertFalse(
+                    matches_visible_notice([{**visible, **changes}], "Saved")
+                )
+        self.assertFalse(matches_visible_notice([], "Saved"))
+
     def test_feedback_history_keeps_transient_and_is_bounded(self):
         evidence = {}
         retain_feedback(evidence, "save", [], 0)
