@@ -159,6 +159,24 @@ beforeEach(() => {
 });
 
 describe("desktop rendered flows through mocked Tauri invoke", () => {
+  it.each([
+    ["en", "safe", "Core version", "Mode: Safe"],
+    ["en", "trusted", "Core version", "Mode: Trusted"],
+    ["zh", "safe", "核心版本", "权限模式：安全"],
+    ["zh", "trusted", "核心版本", "权限模式：信任"],
+  ] as const)(
+    "labels permission mode separately from core version (%s/%s)",
+    async (language, permissionMode, label, detail) => {
+      snapshot.settings.language = language;
+      snapshot.workspaces[0].permissionMode = permissionMode;
+      mount();
+      const version = await screen.findByText(label);
+      const card = version.closest(".metric-card");
+      expect(card).not.toBeNull();
+      expect(within(card as HTMLElement).getByText(detail)).toBeVisible();
+      expect(card).toHaveTextContent(fixtureStatus.coreVersion);
+    },
+  );
   it("browser preview discloses unavailable backend and never invents data or invokes IPC", async () => {
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
     mount();

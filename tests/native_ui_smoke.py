@@ -260,6 +260,14 @@ def matches_visible_notice(observed: list, text: str) -> bool:
     )
 
 
+def rendered_text(driver, element) -> str:
+    """Read live rendered text without WebKitWebDriver's empty element-text result."""
+    text = driver.execute_script("return arguments[0].innerText;", element)
+    if not isinstance(text, str):
+        raise TypeError("Native rendered element text was unavailable")
+    return text
+
+
 def sha256(path: Path) -> str:
     result = hashlib.sha256()
     with path.open("rb") as stream:
@@ -585,7 +593,10 @@ def run(args) -> None:
             def text_present(text):
                 return wait.until(
                     lambda browser: (
-                        text in browser.find_element(By.TAG_NAME, "body").text
+                        text
+                        in rendered_text(
+                            browser, browser.find_element(By.TAG_NAME, "body")
+                        )
                     )
                 )
 
@@ -668,15 +679,23 @@ def run(args) -> None:
             button("Dashboard").click()
             button("Start workspace").click()
             button("Stop workspace")
-            wait.until(
-                lambda browser: (
-                    "READY"
-                    in browser.find_element(By.CSS_SELECTOR, ".local-card").text.upper()
-                )
+
+            def local_ready(browser):
+                card = browser.find_element(By.CSS_SELECTOR, ".local-card")
+                state = rendered_text(
+                    browser, card.find_element(By.CSS_SELECTOR, ".mantine-Badge-root")
+                ).strip()
+                evidence["local_readiness"] = {
+                    "state": state,
+                    "card": redact_diagnostic(rendered_text(browser, card)[:1600]),
+                }
+                return state.upper() == "READY"
+
+            wait.until(local_ready, message="Expected the actual local READY badge")
+            endpoint = rendered_text(
+                driver,
+                driver.find_element(By.CSS_SELECTOR, ".local-card .endpoint-url"),
             )
-            endpoint = driver.find_element(
-                By.CSS_SELECTOR, ".local-card .endpoint-url"
-            ).text
             endpoint, endpoint_port = loopback_endpoint(endpoint)
             evidence["checks"].append(
                 "real onboarding, configuration persistence, native start, local readiness"
@@ -750,7 +769,7 @@ def run(args) -> None:
 
             def real_calls(browser):
                 rows = [
-                    row.text
+                    rendered_text(browser, row)
                     for row in browser.find_elements(
                         By.CSS_SELECTOR, ".call-row:not(.call-header)"
                     )
@@ -777,9 +796,14 @@ def run(args) -> None:
             wait.until(
                 lambda browser: (
                     "STOPPED"
-                    in browser.find_element(
-                        By.CSS_SELECTOR, ".workspace-kicker"
-                    ).text.upper()
+                    == rendered_text(
+                        browser,
+                        browser.find_element(
+                            By.CSS_SELECTOR, ".workspace-kicker .mantine-Badge-root"
+                        ),
+                    )
+                    .strip()
+                    .upper()
                 )
             )
             wait_until(
@@ -891,6 +915,22 @@ def run(args) -> None:
 
 
 class ProtocolHelpersTest(unittest.TestCase):
+    def test_rendered_text_requires_live_inner_text(self):
+        class ReadOnlyDriver:
+            value = "READY\n"
+
+            def execute_script(self, script, element):
+                self.last_read = (script, element)
+                return self.value
+
+        driver = ReadOnlyDriver()
+        element = object()
+        self.assertEqual(rendered_text(driver, element), "READY\n")
+        self.assertEqual(driver.last_read, ("return arguments[0].innerText;", element))
+        driver.value = None
+        with self.assertRaises(TypeError):
+            rendered_text(driver, element)
+
     def test_notice_requires_rendered_unobscured_viewport_text(self):
         visible = {
             "role": "status",

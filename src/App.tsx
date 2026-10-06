@@ -659,8 +659,8 @@ export default function App() {
                           status?.coreVersion || workspace.coreVersion || "—",
                         detail:
                           workspace.permissionMode === "safe"
-                            ? "Safe"
-                            : "Trusted",
+                            ? "Mode: Safe"
+                            : "Mode: Trusted",
                       },
                     ].map((metric) => (
                       <Paper

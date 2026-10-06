@@ -99,6 +99,8 @@ const zh: Record<string, string> = {
   "Copy failed": "复制失败",
   Safe: "安全模式",
   Trusted: "信任模式",
+  "Mode: Safe": "权限模式：安全",
+  "Mode: Trusted": "权限模式：信任",
   "Core version": "核心版本",
   "CPU usage": "CPU 使用率",
   Memory: "内存",
