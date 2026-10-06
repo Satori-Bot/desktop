@@ -1,6 +1,18 @@
 use desktop_manager::{core, model::*, Manager};
 use serde_json::json;
-use std::{net::TcpListener, sync::Arc, time::Duration};
+use std::{
+    net::TcpListener,
+    sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
+};
+
+fn lifecycle_fixture_lock() -> MutexGuard<'static, ()> {
+    // These process-launch fixtures share OS descriptor/port state. Keep
+    // independent test cases from probing ports while another case forks;
+    // dedicated concurrency tests and the two-workspace case remain intact.
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
 fn python() -> String {
     std::env::var("PYTHON")
         .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into())
@@ -11,22 +23,120 @@ fn fixture() -> Vec<String> {
         format!("{}/tests/fixtures/fake_core.py", env!("CARGO_MANIFEST_DIR")),
     ]
 }
+
+#[cfg(unix)]
+fn unused_port(port: u16) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    // TcpListener enables SO_REUSEADDR on Unix, so its successful bind can
+    // select a port with connections left by an earlier test invocation.
+    // Probe without reuse: fixture allocation should skip all such TCP state.
+    #[cfg(target_os = "linux")]
+    let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let kind = libc::SOCK_STREAM;
+    let fd = unsafe { libc::socket(libc::AF_INET, kind, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+    if unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    address.sin_family = libc::AF_INET as libc::sa_family_t;
+    address.sin_port = port.to_be();
+    address.sin_addr.s_addr = u32::from_ne_bytes([127, 0, 0, 1]);
+    #[cfg(target_os = "macos")]
+    {
+        address.sin_len = std::mem::size_of_val(&address) as u8;
+    }
+    let result = unsafe {
+        libc::bind(
+            socket.as_raw_fd(),
+            (&address as *const libc::sockaddr_in).cast(),
+            std::mem::size_of_val(&address) as libc::socklen_t,
+        )
+    };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn unused_port(port: u16) -> std::io::Result<()> {
+    TcpListener::bind(("127.0.0.1", port)).map(|_| ())
+}
+
 fn test_port() -> u16 {
     // Keep fixture listeners out of the OS outbound ephemeral range. Otherwise
     // readiness HTTP requests can allocate a just-released candidate as their
     // source port before its server starts, leaving a TIME_WAIT collision.
-    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(20000);
-    loop {
-        let port = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
+    // Independent/repeated invocations must not all probe the same first ports
+    // while the previous invocation's sockets are still settling. Each run
+    // starts elsewhere, and its monotonic index never repeats a candidate.
+    const PORT_COUNT: u16 = 4000;
+    static OFFSET: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    let offset =
+        *OFFSET.get_or_init(|| (uuid::Uuid::new_v4().as_u128() % PORT_COUNT as u128) as u16);
+    for _ in 0..PORT_COUNT {
+        let index = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            index < PORT_COUNT,
+            "Lifecycle fixture port range is exhausted"
+        );
+        let port = 20000 + (offset + index) % PORT_COUNT;
+        match unused_port(port) {
+            Ok(()) => return port,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => panic!("Could not probe lifecycle fixture port {port}: {error}"),
         }
     }
+    panic!("No unused lifecycle fixture port is available");
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_port_probe_rejects_prior_tcp_state() {
+    use std::io::Read;
+    use std::net::{Shutdown, TcpStream};
+
+    let _test_guard = lifecycle_fixture_lock();
+    // This in-process fixture keeps its listener bound while obtaining the
+    // port, so it does not itself introduce the bind/drop allocation window.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let (mut server, _) = listener.accept().unwrap();
+    drop(listener);
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    server
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+
+    // Make the server the active closer, putting its local port in TIME_WAIT.
+    server.shutdown(Shutdown::Write).unwrap();
+    let mut byte = [0u8; 1];
+    assert_eq!(client.read(&mut byte).unwrap(), 0);
+    client.shutdown(Shutdown::Write).unwrap();
+    assert_eq!(server.read(&mut byte).unwrap(), 0);
+    drop(client);
+    drop(server);
+
+    assert_eq!(
+        unused_port(port).unwrap_err().kind(),
+        std::io::ErrorKind::AddrInUse
+    );
 }
 fn workspace(path: &std::path::Path) -> Workspace {
     serde_json::from_value(json!({"id":"","name":"Sample project","path":path,"port":test_port(),"access":"local","auth":"noauth","permissionMode":"safe","coreCommand":fixture()})).unwrap()
 }
-fn manager() -> (tempfile::TempDir, Arc<Manager>) {
+fn manager() -> (MutexGuard<'static, ()>, tempfile::TempDir, Arc<Manager>) {
+    let guard = lifecycle_fixture_lock();
     let dir = tempfile::tempdir().unwrap();
     #[cfg(unix)]
     let m = Manager::open_supervised(
@@ -40,11 +150,11 @@ fn manager() -> (tempfile::TempDir, Arc<Manager>) {
     .unwrap();
     #[cfg(not(unix))]
     let m = Manager::open(dir.path().join("home")).unwrap();
-    (dir, m)
+    (guard, dir, m)
 }
 #[test]
 fn lifecycle_two_workspaces_and_configuration_lock() {
-    let (d, m) = manager();
+    let (_test_guard, d, m) = manager();
     let w = m.save_workspace(workspace(d.path()), None).unwrap();
     let mut second = workspace(d.path());
     second.name = "Second".into();
@@ -65,7 +175,7 @@ fn lifecycle_two_workspaces_and_configuration_lock() {
 }
 #[test]
 fn occupied_port_never_kills_unrelated_listener() {
-    let (d, m) = manager();
+    let (_test_guard, d, m) = manager();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut w = workspace(d.path());
     w.port = listener.local_addr().unwrap().port();
@@ -80,23 +190,50 @@ fn occupied_port_never_kills_unrelated_listener() {
 }
 #[test]
 fn crash_is_reported_and_can_restart() {
-    let (d, m) = manager();
+    let (_test_guard, d, m) = manager();
     let w = m.save_workspace(workspace(d.path()), None).unwrap();
     let s = m.start(&w.id).unwrap();
     let mut sys = sysinfo::System::new_all();
     sys.refresh_all();
-    sys.process(sysinfo::Pid::from_u32(s.pid.unwrap()))
-        .unwrap()
-        .kill();
-    std::thread::sleep(Duration::from_millis(100));
-    m.refresh();
-    assert_eq!(m.snapshot().statuses[0].state, "error");
+    let pid = sysinfo::Pid::from_u32(s.pid.unwrap());
+    let process = sys.process(pid).unwrap();
+    let birth = process.start_time();
+    assert!(process.kill(), "Fixture crash signal was not accepted");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut exited;
+    let mut status;
+    loop {
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        exited = !sys.process(pid).is_some_and(|process| {
+            process.start_time() == birth && process.status() != sysinfo::ProcessStatus::Zombie
+        });
+        // refresh intentionally skips a busy lifecycle lock. Wait for both
+        // real process exit and the resulting manager state, rather than
+        // assuming a single observation 100ms after kill must see the crash.
+        m.refresh();
+        status = m.snapshot().statuses.remove(0);
+        if (exited && status.state == "error" && !status.cleanup_pending)
+            || std::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        exited,
+        "Fixture process did not exit after its crash signal"
+    );
+    assert_eq!(
+        status.state, "error",
+        "Manager never observed the fixture crash"
+    );
+    assert!(!status.cleanup_pending, "Crash cleanup did not finish");
     assert_eq!(m.start(&w.id).unwrap().state, "running");
     m.stop_all().unwrap();
 }
 #[test]
 fn remote_requires_authentication_and_safe_url() {
-    let (d, m) = manager();
+    let (_test_guard, d, m) = manager();
     let mut w = workspace(d.path());
     w.access = "quick".into();
     assert!(m.save_workspace(w.clone(), None).is_err());
@@ -111,7 +248,7 @@ fn tunnel_failure_does_not_stop_local_core() {
     if core::find_program("cloudflared").is_some() {
         return;
     }
-    let (d, m) = manager();
+    let (_test_guard, d, m) = manager();
     let mut w = workspace(d.path());
     w.access = "quick".into();
     w.auth = "bearer".into();
@@ -129,7 +266,7 @@ fn tunnel_failure_does_not_stop_local_core() {
 }
 #[test]
 fn oauth_requires_client_authorization_but_has_verified_core() {
-    let (d, m) = manager();
+    let (_test_guard, d, m) = manager();
     let mut w = workspace(d.path());
     w.auth = "oauth".into();
     let w = m.save_workspace(w, None).unwrap();
@@ -146,7 +283,7 @@ fn oauth_requires_client_authorization_but_has_verified_core() {
 }
 #[test]
 fn diagnostics_do_not_export_paths_credentials_or_urls() {
-    let (d, m) = manager();
+    let (_test_guard, d, m) = manager();
     let w = m
         .save_workspace(
             workspace(d.path()),
@@ -172,7 +309,7 @@ fn official_core_mcp_acceptance() {
         &std::env::var("DESKTOP_CORE_COMMAND_JSON").expect("set DESKTOP_CORE_COMMAND_JSON"),
     )
     .unwrap();
-    let (d, m) = manager();
+    let (_test_guard, d, m) = manager();
     let project = d.path().join("项目 空间 (MCP)");
     std::fs::create_dir(&project).unwrap();
     std::fs::write(project.join("hello.txt"), "desktop acceptance\n").unwrap();
@@ -294,7 +431,7 @@ fn official_core_mcp_acceptance() {
 
 #[test]
 fn deleted_workspace_cannot_be_resurrected_by_a_stale_save() {
-    let (dir, manager) = manager();
+    let (_test_guard, dir, manager) = manager();
     let workspace = manager.save_workspace(workspace(dir.path()), None).unwrap();
     manager.delete_workspace(&workspace.id).unwrap();
     let backup = std::fs::read(manager.storage.home.join("desktop-before-delete.json")).unwrap();
@@ -314,7 +451,7 @@ fn deleted_workspace_cannot_be_resurrected_by_a_stale_save() {
 
 #[test]
 fn successful_shutdown_closes_admission_but_stop_all_does_not() {
-    let (dir, manager) = manager();
+    let (_test_guard, dir, manager) = manager();
     let workspace = manager.save_workspace(workspace(dir.path()), None).unwrap();
     manager.start(&workspace.id).unwrap();
     manager.stop_all().unwrap();
@@ -343,7 +480,7 @@ fn successful_shutdown_closes_admission_but_stop_all_does_not() {
 
 #[test]
 fn workspace_name_limit_counts_unicode_characters_not_utf8_bytes() {
-    let (dir, manager) = manager();
+    let (_test_guard, dir, manager) = manager();
     let mut value = workspace(dir.path());
     value.name = "项目".repeat(40);
     let saved = manager.save_workspace(value, None).unwrap();

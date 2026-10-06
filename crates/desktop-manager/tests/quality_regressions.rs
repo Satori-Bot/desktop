@@ -66,6 +66,10 @@ fn probe_fixture(oversized_initialize: bool, advertised: bool) -> anyhow::Result
                     Err(error) => panic!("fixture accept failed: {error}"),
                 }
             };
+            // Accepted-socket flags differ across operating systems. Explicit
+            // blocking I/O prevents the bounded accept loop turning this fixture
+            // into a partial write that looks like a valid small response.
+            connection.set_nonblocking(false).unwrap();
             connection
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
