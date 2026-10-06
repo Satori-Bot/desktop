@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The bundled manager window only. No remote pages, arbitrary shell, filesystem, HTTP or credential APIs.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

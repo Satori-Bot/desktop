@@ -1,0 +1,42 @@
+{
+  "name": "coding-tools-mcp-desktop",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b tsconfig.json tsconfig.tools.json && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "typecheck": "tsc -b tsconfig.json tsconfig.tools.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "tauri": "tauri",
+    "format:check": "prettier --check src e2e index.html vite.config.ts vitest.config.ts playwright.config.ts tsconfig*.json package.json"
+  },
+  "dependencies": {
+    "@fontsource-variable/geist": "^5.2.8",
+    "@mantine/core": "^8.3.4",
+    "@mantine/hooks": "^8.3.4",
+    "@tauri-apps/api": "^2.8.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.1",
+    "@tauri-apps/cli": "^2.8.4",
+    "@testing-library/jest-dom": "^6.8.0",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^24.19.1",
+    "@types/react": "^19.1.16",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.4",
+    "jsdom": "^27.0.0",
+    "prettier": "^3.9.9",
+    "typescript": "~5.9.2",
+    "vite": "^7.1.7",
+    "vitest": "^3.2.4"
+  }
+}

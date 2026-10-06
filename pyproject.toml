@@ -4,14 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coding-tools-mcp-desktop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Desktop application for running and managing Coding Tools MCP."
 requires-python = ">=3.11"
-dependencies = [
-  "coding-tools-mcp>=0.5,<1",
-  "PySide6>=6.8,<6.9",
-  "psutil>=7.0,<8",
-]
+dependencies = []
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Coding Tools MCP Contributors" }]
@@ -40,6 +36,3 @@ coding-tools-mcp-desktop = "mcp_desktop_client.app:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["mcp_desktop_client*"]
-
-[tool.setuptools.package-data]
-mcp_desktop_client = ["locales/*.qm", "locales/*.ts"]

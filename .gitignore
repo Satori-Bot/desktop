@@ -8,3 +8,10 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+node_modules/
+target/
+src-tauri/gen/
+test-results/
+playwright-report/
+*.tsbuildinfo
+artifacts/

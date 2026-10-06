@@ -1,0 +1,29 @@
+name: Build native bundles
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bundles:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: npm ci
+      - run: npm run tauri build
+      - uses: actions/upload-artifact@v6
+        with:
+          name: native-bundles-${{ matrix.os }}
+          path: target/release/bundle/
+# Builds review artifacts only. Publishing/signing a release is a separate explicit step.
