@@ -44,5 +44,16 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: native-bundles-${{ matrix.os }}
-          path: target/release/bundle/
+          path: |
+            target/release/bundle/**/*.deb
+            target/release/bundle/**/*.rpm
+            target/release/bundle/**/*.AppImage
+            target/release/bundle/**/*.dmg
+            target/release/bundle/**/*.msi
+            target/release/bundle/**/*.exe
+      - uses: actions/upload-artifact@v6
+        if: runner.os == 'Linux'
+        with:
+          name: native-linux-deb
+          path: target/release/bundle/deb/*.deb
 # Builds review artifacts only. Publishing/signing a release is a separate explicit step.

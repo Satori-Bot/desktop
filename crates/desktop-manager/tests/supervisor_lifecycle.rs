@@ -7,7 +7,10 @@ use desktop_manager::{
 use serde_json::Value;
 use std::{
     fs,
-    os::unix::ffi::{OsStrExt, OsStringExt},
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::ffi::{OsStrExt, OsStringExt},
+    },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -20,12 +23,21 @@ import json, os, signal, stat, subprocess, sys, time
 from pathlib import Path
 root = Path(os.environ['FIXTURE_DIR'])
 child = subprocess.Popen([sys.executable, '-c', '''
-import os, signal, time
+import json, os, signal, stat, sys, time
 from pathlib import Path
 root = Path(os.environ['FIXTURE_DIR'])
 if os.environ.get('RESIST_TERM') == '1':
     signal.signal(signal.SIGTERM, lambda *_: (root / 'child.term').write_text('term'))
-(root / 'child.ready').write_text(str(os.getpid()))
+pipes = []
+for name in os.listdir('/proc/self/fd' if sys.platform == 'linux' else '/dev/fd'):
+    try:
+        fd = int(name)
+        info = os.fstat(fd)
+        if stat.S_ISFIFO(info.st_mode):
+            pipes.append({'fd': fd, 'identity': {'dev': info.st_dev, 'ino': info.st_ino, 'type': stat.S_IFMT(info.st_mode)}})
+    except (OSError, ValueError): pass
+(root / 'child.tmp').write_text(json.dumps({'pid': os.getpid(), 'pipes': pipes}))
+os.replace(root / 'child.tmp', root / 'child.ready')
 while True: time.sleep(0.02)
 '''], close_fds=False)
 def stop(*_):
@@ -36,12 +48,15 @@ def stop(*_):
 signal.signal(signal.SIGTERM, stop)
 # Allocate real memory so metrics cannot pass by reporting the tiny supervisor.
 memory = bytearray(32 * 1024 * 1024)
-extra_fifos = []
-for fd in range(3, 256):
+pipes = []
+for name in os.listdir('/proc/self/fd' if sys.platform == 'linux' else '/dev/fd'):
     try:
-        if stat.S_ISFIFO(os.fstat(fd).st_mode): extra_fifos.append(fd)
-    except OSError: pass
-info = {'core': os.getpid(), 'child': child.pid, 'extra_fifos': extra_fifos,
+        fd = int(name)
+        info = os.fstat(fd)
+        if stat.S_ISFIFO(info.st_mode):
+            pipes.append({'fd': fd, 'identity': {'dev': info.st_dev, 'ino': info.st_ino, 'type': stat.S_IFMT(info.st_mode)}})
+    except (OSError, ValueError): pass
+info = {'core': os.getpid(), 'child': child.pid, 'pipes': pipes,
         'cwd': os.getcwd(), 'args': [os.fsencode(x).hex() for x in sys.argv[1:]],
         'secret': os.environ.get('FIXTURE_SECRET'), 'removed': os.environ.get('HOME'),
         'environment': sorted(os.environ), 'stdin_is_null': os.fstat(0).st_rdev == os.stat('/dev/null').st_rdev}
@@ -304,12 +319,126 @@ fn argv_environment_and_working_directory_survive_without_reconstruction() {
     assert_eq!(data["secret"], "private test value");
     assert!(data["removed"].is_null());
     assert_eq!(data["stdin_is_null"], true);
-    assert_eq!(data["extra_fifos"], serde_json::json!([]));
     let environment = data["environment"].as_array().unwrap();
     assert!(environment.iter().all(
         |name| ["FIXTURE_DIR", "FIXTURE_SECRET", "LC_CTYPE"].contains(&name.as_str().unwrap())
     ));
     fixture.process.as_mut().unwrap().stop().unwrap();
+    fixture.assert_stopped();
+}
+
+#[test]
+fn actual_liveness_endpoints_are_not_inherited_with_unrelated_pipes_present() {
+    check_liveness_endpoint_isolation(false);
+}
+
+#[test]
+fn pipe_identity_checker_rejects_intentionally_inherited_actual_liveness_endpoint() {
+    check_liveness_endpoint_isolation(true);
+}
+
+fn check_liveness_endpoint_isolation(inject_liveness_leak: bool) {
+    // An observer runs before the real helper, so no production debug API is
+    // needed. Darwin gives pipe endpoints different inode hashes; record the
+    // helper's actual read endpoint and the desktop's actual write endpoint.
+    const OBSERVER: &str = r#"
+import json, os, stat, sys
+from pathlib import Path
+def identity(fd):
+    info = os.fstat(fd)
+    return {'dev': info.st_dev, 'ino': info.st_ino, 'type': stat.S_IFMT(info.st_mode)}
+read_end = identity(0)
+unrelated = os.pipe()
+for fd in unrelated: os.set_inheritable(fd, True)
+leaked = None
+if os.environ.get('INJECT_LIVENESS_LEAK') == '1':
+    fd = os.dup(0)
+    os.set_inheritable(fd, True)
+    leaked = {'fd': fd, 'identity': identity(fd)}
+info = {'read_end': read_end, 'unrelated': [{'fd': fd, 'identity': identity(fd)} for fd in unrelated], 'leaked': leaked}
+root = Path(os.environ['FIXTURE_DIR'])
+(root / 'pipe-observer.json').write_text(json.dumps(info))
+os.execv(sys.argv[1], sys.argv[1:])
+"#;
+    fn identity(fd: RawFd) -> Value {
+        let mut info: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(fd, &mut info) }, 0);
+        serde_json::json!({"dev": info.st_dev, "ino": info.st_ino, "type": info.st_mode & libc::S_IFMT})
+    }
+    fn reject_liveness_endpoints(pipes: &[Value], endpoints: [&Value; 2]) -> Result<(), String> {
+        for endpoint in endpoints {
+            if let Some(pipe) = pipes.iter().find(|pipe| &pipe["identity"] == endpoint) {
+                return Err(format!(
+                    "Inherited liveness endpoint {endpoint} through {pipe}"
+                ));
+            }
+        }
+        Ok(())
+    }
+    let mut fixture = Fixture::new();
+    let mut command = Command::new(python());
+    command
+        .args(["-c", OBSERVER])
+        .arg(supervisor())
+        .args([desktop_manager::supervisor::ARGUMENT, "--"])
+        .arg(python())
+        .args(["-c", CORE])
+        .env("FIXTURE_DIR", fixture.dir.path())
+        .env(
+            "INJECT_LIVENESS_LEAK",
+            if inject_liveness_leak { "1" } else { "0" },
+        )
+        .current_dir(fixture.dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let child = command.spawn().unwrap();
+    let write_end = identity(child.stdin.as_ref().unwrap().as_raw_fd());
+    fixture.identities.push(Identity::capture(child.id()));
+    fixture.desktop = Some(child);
+    let core = fixture.capture_core();
+    let descendant: Value =
+        serde_json::from_slice(&fs::read(fixture.dir.path().join("child.ready")).unwrap()).unwrap();
+    let observed: Value =
+        serde_json::from_slice(&fs::read(fixture.dir.path().join("pipe-observer.json")).unwrap())
+            .unwrap();
+    let read_end = &observed["read_end"];
+    assert_eq!(read_end["type"], libc::S_IFIFO);
+    assert_eq!(write_end["type"], libc::S_IFIFO);
+    for (name, data) in [("core", &core), ("descendant", &descendant)] {
+        let pipes = data["pipes"].as_array().unwrap();
+        let isolation = reject_liveness_endpoints(pipes, [read_end, &write_end]);
+        if inject_liveness_leak {
+            // Negative control: duplicate the REAL read endpoint, not a lookalike
+            // pipe. Both inventories must contain it and the SAME checker used
+            // in the normal case must reject that known control-pipe leak.
+            assert_eq!(&observed["leaked"]["identity"], read_end);
+            assert!(pipes.contains(&observed["leaked"]),
+                "{name} did not observe intentionally leaked real liveness endpoint; descriptors: {pipes:?}");
+            isolation.expect_err("identity checker accepted an actual liveness-endpoint leak");
+        } else {
+            assert!(observed["leaked"].is_null());
+            isolation.unwrap_or_else(|error| panic!("{name}: {error}; descriptors: {pipes:?}"));
+        }
+        // Inheritable Cargo/runner pipes are allowed. This positive control
+        // proves the inventory really sees unrelated pipes instead of passing
+        // because enumeration failed or every descriptor was blindly closed.
+        for unrelated in observed["unrelated"].as_array().unwrap() {
+            assert!(pipes.contains(unrelated),
+                "{name} did not observe deliberate unrelated pipe {unrelated}; descriptors: {pipes:?}");
+        }
+    }
+    drop(fixture.desktop.as_mut().unwrap().stdin.take());
+    let mut status = None;
+    poll(
+        || {
+            status = fixture.desktop.as_mut().unwrap().try_wait().unwrap();
+            status.is_some()
+        },
+        Duration::from_secs(10),
+        "closing actual liveness writer did not stop helper",
+    );
+    assert!(status.unwrap().success());
     fixture.assert_stopped();
 }
 

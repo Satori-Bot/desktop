@@ -4,7 +4,7 @@ Prerequisites (installed by CI, not by this script):
   python -m pip install selenium==4.50.0 \
     'git+https://github.com/xyTom/coding-tools-mcp.git@d7c2dda48bcedbd066c7dbc24a1b63205384d269'
   cargo install tauri-driver --version 2.0.6 --locked
-  apt packages: webkit2gtk-driver xvfb dbus-x11 and normal Tauri prerequisites
+  apt packages: webkit2gtk-driver xvfb dbus-x11 xclip and normal Tauri prerequisites
 
 Run after `npm run tauri build -- --debug --no-bundle -- --locked`:
   dbus-run-session -- xvfb-run -a python tests/native_ui_smoke.py \
@@ -95,6 +95,22 @@ def rpc_payload(text: str, request_id: int) -> dict:
                 )
             return value
     raise AssertionError(f"No MCP response matched request {request_id}")
+
+
+def verify_clipboard_config(text: str, endpoint: str) -> None:
+    """Validate only this smoke's local/noauth client config; never log clipboard data."""
+    loopback_endpoint(endpoint)
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise AssertionError(
+            "Native clipboard did not contain MCP configuration JSON"
+        ) from error
+    expected = {"mcpServers": {WORKSPACE_NAME: {"url": endpoint}}}
+    if value != expected:
+        raise AssertionError(
+            "Native clipboard did not match the test-created local/noauth configuration"
+        )
 
 
 class McpClient:
@@ -226,11 +242,14 @@ def run(args) -> None:
     core = Path(args.core).absolute()  # Preserve venv launcher symlink spelling.
     tauri_driver = shutil.which(args.tauri_driver)
     native_driver = shutil.which("WebKitWebDriver")
+    clipboard_reader = shutil.which("xclip")
     for executable in [binary, core]:
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise SystemExit(f"Required executable is unavailable: {executable}")
     if not tauri_driver or not native_driver:
         raise SystemExit("Install tauri-driver==2.0.6 and the distro WebKitWebDriver.")
+    if not clipboard_reader:
+        raise SystemExit("Install xclip for the isolated native clipboard check.")
     installed_commit = verify_core_source()
     # Imported only in the native path so --self-test/--help need no Selenium install.
     from selenium import webdriver
@@ -433,6 +452,36 @@ def run(args) -> None:
             )
             capture("native-running")
 
+            button("Connections").click()
+            local_copy = wait.until(
+                ec.element_to_be_clickable(
+                    (
+                        By.XPATH,
+                        "//*[contains(concat(' ', normalize-space(@class), ' '), ' local-card ')]/..//button[normalize-space(.)='Copy config']",
+                    )
+                )
+            )
+            local_copy.click()
+            # Read only after this test's explicit copy succeeds, inside its private Xvfb display.
+            # No clipboard stubs, browser permission grants, or direct clipboard writes are used.
+            text_present("Copied")
+            copied = subprocess.run(
+                [clipboard_reader, "-o", "-selection", "clipboard"],
+                check=True,
+                capture_output=True,
+                timeout=5,
+                env=env,
+            )
+            if len(copied.stdout) > 65536:
+                raise AssertionError(
+                    "Test-created clipboard configuration exceeded its size bound"
+                )
+            verify_clipboard_config(copied.stdout.decode("utf-8"), endpoint)
+            evidence["checks"].append(
+                "real native Copy config produced the expected local/noauth JSON in X11 clipboard"
+            )
+            capture("native-connections")
+
             client = McpClient(endpoint)
             init = client.call(
                 1,
@@ -613,6 +662,39 @@ class ProtocolHelpersTest(unittest.TestCase):
             rpc_payload(json.dumps(expected), 4)
         with self.assertRaises(AssertionError):
             rpc_payload('{"id":3,"error":{"message":"failed"}}', 3)
+
+    def test_clipboard_config(self):
+        endpoint = "http://127.0.0.1:28766/mcp"
+        verify_clipboard_config(
+            json.dumps({"mcpServers": {WORKSPACE_NAME: {"url": endpoint}}}), endpoint
+        )
+        with self.assertRaises(AssertionError):
+            verify_clipboard_config("not JSON", endpoint)
+        with self.assertRaises(AssertionError):
+            verify_clipboard_config(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            WORKSPACE_NAME: {"url": "https://example.invalid/mcp"}
+                        }
+                    }
+                ),
+                endpoint,
+            )
+        with self.assertRaises(AssertionError):
+            verify_clipboard_config(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            WORKSPACE_NAME: {
+                                "url": endpoint,
+                                "headers": {"Authorization": "unexpected"},
+                            }
+                        }
+                    }
+                ),
+                endpoint,
+            )
 
     def test_diagnostic_redaction(self):
         value = redact_diagnostic(
