@@ -764,6 +764,7 @@ dependencies = [
  "serde_json",
  "shell-words",
  "signal-hook",
+ "socket2",
  "sysinfo",
  "tempfile",
  "url",

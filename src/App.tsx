@@ -43,6 +43,8 @@ import {
 import { api, backendAvailable } from "./api";
 import type { Activity, Settings, Snapshot, Workspace } from "./types";
 import { errorText, isActive } from "./types";
+import { blockingOperation, isMaintenance } from "./operations";
+import type { Operation } from "./operations";
 import { translator } from "./i18n";
 import {
   CallList,
@@ -84,8 +86,11 @@ export default function App() {
     message: string;
   } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState("");
-  const lock = useRef(false);
+  const [operations, setOperations] = useState<Operation[]>([]);
+  const operationLock = useRef<Operation[]>([]);
+  const feedbackRequest = useRef(0);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const request = useRef(0);
   const snapshotFlight = useRef<Promise<void> | null>(null);
   const mounted = useRef(true);
@@ -114,6 +119,23 @@ export default function App() {
   const workspace = snapshot?.workspaces.find((w) => w.id === selected);
   const status = snapshot?.statuses.find((s) => s.workspaceId === selected);
   const active = isActive(status);
+  const busy = operations.length > 0;
+  const workspaceBusy =
+    blockingOperation(operations, { key: "workspace", workspaceId: selected })
+      ?.key ?? "";
+  const settingsBusy =
+    blockingOperation(operations, { key: "settings" })?.key ?? "";
+  const maintenanceBusy =
+    blockingOperation(operations, { key: "install" })?.key ?? "";
+  const maintenance = operations.find(isMaintenance);
+  const maintenanceLabel =
+    maintenance &&
+    {
+      install: "Installing core…",
+      rollback: "Restoring core…",
+      "cloudflare-login": "Authorizing Cloudflare…",
+      "tunnel-setup": "Setting up tunnel…",
+    }[maintenance.key];
   const transitional =
     status?.state === "starting" || status?.state === "stopping";
   const refresh = useCallback((afterMutation = false): Promise<void> => {
@@ -197,38 +219,92 @@ export default function App() {
       clearInterval(timer);
     };
   }, [selected, available, status?.pid]);
-  const run: RunAction = async (key, fn, success) => {
-    if (lock.current) return;
-    lock.current = true;
-    setBusy(key);
+  function reportFailure(message: string) {
+    // Concurrent operations may both fail. Keep each actionable error visible,
+    // even when an older operation finishes after a newer independent action.
+    setFeedback((current) => ({
+      kind: "error",
+      message:
+        current?.kind === "error" ? `${current.message}\n${message}` : message,
+    }));
+  }
+  const run = async <T,>(
+    key: string,
+    fn: () => Promise<T>,
+    success?: string,
+    workspaceId?: string,
+  ): Promise<T | undefined> => {
+    const operation = { key, workspaceId };
+    if (blockingOperation(operationLock.current, operation)) return;
+    operationLock.current = [...operationLock.current, operation];
+    setOperations(operationLock.current);
+    const feedbackSequence = ++feedbackRequest.current;
+    const targetName = snapshot?.workspaces.find(
+      (item) => item.id === workspaceId,
+    )?.name;
+    const contextualMessage = (message: string) =>
+      workspaceId && workspaceId !== selectedRef.current
+        ? `${targetName ?? workspaceId}: ${message}`
+        : message;
     setFeedback(null);
     try {
       const result = await fn();
       if (mounted.current) {
         await refresh(true);
-        if (mounted.current && success)
-          setFeedback({ kind: "success", message: success });
+        if (
+          mounted.current &&
+          success &&
+          feedbackSequence === feedbackRequest.current
+        )
+          setFeedback((current) =>
+            current?.kind === "error"
+              ? current
+              : {
+                  kind: "success",
+                  message: contextualMessage(success),
+                },
+          );
       }
       return result;
     } catch (e) {
-      if (mounted.current)
-        setFeedback({ kind: "error", message: errorText(e) });
+      if (mounted.current) {
+        const action = {
+          install: "Install version",
+          rollback: "Roll back",
+          "cloudflare-login": "Authorize Cloudflare",
+          "tunnel-setup": "Create tunnel and DNS",
+        }[key];
+        reportFailure(
+          contextualMessage(
+            action ? `${t(action)}: ${errorText(e)}` : errorText(e),
+          ),
+        );
+      }
       return undefined;
     } finally {
-      lock.current = false;
-      if (mounted.current) setBusy("");
+      operationLock.current = operationLock.current.filter(
+        (item) => item !== operation,
+      );
+      if (mounted.current) setOperations(operationLock.current);
     }
   };
+  // Capture the workspace at invocation, even when its page is subsequently removed.
+  const runWorkspace: RunAction = (key, fn, success) =>
+    run(key, fn, success, workspace?.id);
   async function copy(value: string) {
+    const sequence = ++feedbackRequest.current;
     setFeedback(null);
     try {
       await navigator.clipboard.writeText(value);
-      setFeedback({ kind: "success", message: t("Copied") });
+      if (mounted.current && sequence === feedbackRequest.current)
+        setFeedback((current) =>
+          current?.kind === "error"
+            ? current
+            : { kind: "success", message: t("Copied") },
+        );
     } catch (e) {
-      setFeedback({
-        kind: "error",
-        message: `${t("Copy failed")}: ${errorText(e)}`,
-      });
+      if (mounted.current && sequence === feedbackRequest.current)
+        reportFailure(`${t("Copy failed")}: ${errorText(e)}`);
     }
   }
   function navigate(next: Page) {
@@ -244,8 +320,8 @@ export default function App() {
     confirmationCompleted.current = false;
     setConfirm(confirmation);
   }
-  function saved(next: Workspace, navigate = true) {
-    if (workspaceModal !== undefined) editorSaved.current = true;
+  function workspaceSaved(next: Workspace, add = false) {
+    if (!mounted.current) return;
     ++request.current;
     setSnapshot((current) =>
       current
@@ -253,12 +329,19 @@ export default function App() {
             ...current,
             workspaces: current.workspaces.some((w) => w.id === next.id)
               ? current.workspaces.map((w) => (w.id === next.id ? next : w))
-              : [...current.workspaces, next],
+              : add
+                ? [...current.workspaces, next]
+                : current.workspaces,
           }
         : current,
     );
+  }
+  function saved(next: Workspace) {
+    if (!mounted.current) return;
+    if (workspaceModal !== undefined) editorSaved.current = true;
+    workspaceSaved(next, true);
     setSelected(next.id);
-    if (navigate) setPage("Dashboard");
+    setPage("Dashboard");
   }
   function settingsSaved(settings: Settings) {
     if (!mounted.current) return;
@@ -304,6 +387,7 @@ export default function App() {
           return true;
         },
         t("Operation completed"),
+        target.id,
       );
       if (result) {
         confirmationCompleted.current = true;
@@ -347,7 +431,10 @@ export default function App() {
                 label: w.name,
               })) ?? []
             }
-            disabled={!snapshot?.workspaces.length || !!busy}
+            disabled={
+              !snapshot?.workspaces.length ||
+              operations.some((item) => item.key === "quit")
+            }
             leftSection={<FolderOpen size={15} />}
             allowDeselect={false}
           />
@@ -489,6 +576,19 @@ export default function App() {
               </Button>
             </Alert>
           )}
+          {maintenanceLabel && (
+            <Alert
+              mb="lg"
+              color="blue"
+              role="status"
+              aria-label={t("Background operation")}
+            >
+              <Text fw={600}>{t(maintenanceLabel)}</Text>
+              {t(
+                "You can switch workspaces and stop services that are not busy.",
+              )}
+            </Alert>
+          )}
           {snapshot?.migrationNotice && (
             <Alert mb="lg" color="blue">
               {snapshot.migrationNotice}
@@ -508,12 +608,16 @@ export default function App() {
               coreAvailable={snapshot?.coreAvailable ?? null}
               cloudflaredAvailable={snapshot?.cloudflaredAvailable ?? null}
               run={run}
-              busy={busy}
+              busy={settingsBusy}
+              maintenanceBusy={maintenanceBusy}
+              runtimeBusy={workspaceBusy}
+              anyBusy={busy}
+              runWorkspace={runWorkspace}
               onQuit={() => openConfirmation({ kind: "quit" })}
               onSettingsSaved={settingsSaved}
               workspace={workspace}
               status={status}
-              onSaved={(w) => saved(w, false)}
+              onSaved={workspaceSaved}
               t={t}
             />
           ) : !workspace ? (
@@ -600,23 +704,31 @@ export default function App() {
                   <button
                     className="folder-path mono"
                     onClick={() =>
-                      void run("open", () => api.openWorkspace(workspace.id))
+                      void runWorkspace("open", () =>
+                        api.openWorkspace(workspace.id),
+                      )
                     }
-                    disabled={!!busy}
+                    disabled={!!workspaceBusy}
                   >
                     {workspace.path}
                     <ArrowUpRight size={13} />
                   </button>
                 </div>
                 <Group gap="xs" className="workspace-controls">
-                  {active ? (
+                  {active || status?.portReleasePending ? (
                     <>
                       <Button
                         variant="default"
                         leftSection={<RefreshCw size={15} />}
-                        disabled={!!busy || transitional}
+                        disabled={
+                          !!workspaceBusy ||
+                          transitional ||
+                          !!status?.portReleasePending
+                        }
                         onClick={() =>
-                          void run("restart", () => api.restart(workspace.id))
+                          void runWorkspace("restart", () =>
+                            api.restart(workspace.id),
+                          )
                         }
                       >
                         {t("Restart")}
@@ -625,10 +737,17 @@ export default function App() {
                         color="red"
                         variant="light"
                         leftSection={<Square size={14} />}
-                        loading={busy === "stop"}
-                        disabled={(!!busy && busy !== "stop") || transitional}
+                        loading={workspaceBusy === "stop"}
+                        disabled={
+                          (!!workspaceBusy && workspaceBusy !== "stop") ||
+                          transitional
+                        }
                         onClick={() =>
-                          void run("stop", () => api.stop(workspace.id))
+                          void runWorkspace(
+                            "stop",
+                            () => api.stop(workspace.id),
+                            t("Workspace stopped"),
+                          )
                         }
                       >
                         {t("Stop workspace")}
@@ -637,10 +756,15 @@ export default function App() {
                   ) : (
                     <Button
                       leftSection={<Play size={16} />}
-                      loading={busy === "start"}
-                      disabled={(!!busy && busy !== "start") || !available}
+                      loading={workspaceBusy === "start"}
+                      disabled={
+                        (!!workspaceBusy && workspaceBusy !== "start") ||
+                        !available
+                      }
                       onClick={() =>
-                        void run("start", () => api.start(workspace.id))
+                        void runWorkspace("start", () =>
+                          api.start(workspace.id),
+                        )
                       }
                     >
                       {t("Start workspace")}
@@ -648,6 +772,17 @@ export default function App() {
                   )}
                 </Group>
               </div>
+              {status?.portReleasePending && (
+                <Alert
+                  mb="lg"
+                  color="orange"
+                  title={t("Port is still unavailable")}
+                >
+                  {t(
+                    "Owned processes have stopped, but the port is not available. Retry Stop to check again, or edit this workspace to choose another port. No unrelated process will be stopped.",
+                  )}
+                </Alert>
+              )}
               {page === "Dashboard" ? (
                 <>
                   <div className="metrics-grid">
@@ -821,8 +956,9 @@ export default function App() {
                   key={workspace.id}
                   workspace={workspace}
                   status={status}
-                  run={run}
-                  busy={busy}
+                  run={runWorkspace}
+                  busy={workspaceBusy}
+                  maintenanceBusy={maintenanceBusy}
                   t={t}
                   onEdit={() => openEditor(workspace)}
                   onRemove={() =>
@@ -833,7 +969,7 @@ export default function App() {
                     })
                   }
                   onCopy={copy}
-                  onSaved={(w) => saved(w, false)}
+                  onSaved={workspaceSaved}
                 />
               ) : page === "Activity" ? (
                 <ActivityPage
@@ -847,8 +983,8 @@ export default function App() {
                 <DiagnosticsPage
                   key={workspace.id}
                   workspace={workspace}
-                  run={run}
-                  busy={busy}
+                  run={runWorkspace}
+                  busy={workspaceBusy}
                   t={t}
                 />
               ) : null}
@@ -928,7 +1064,12 @@ export default function App() {
           label={t(confirm.kind === "delete" ? "Remove" : "Quit")}
           onConfirm={() => void confirmed()}
           onClose={() => setConfirm(null)}
-          busy={!!busy}
+          busy={
+            !!blockingOperation(operations, {
+              key: confirm.kind,
+              workspaceId: confirm.kind === "delete" ? confirm.id : undefined,
+            })
+          }
           t={t}
         />
       )}

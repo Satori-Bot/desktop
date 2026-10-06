@@ -28,6 +28,7 @@ export interface Status {
   state: "stopped" | "starting" | "running" | "error" | "stopping";
   pid: number | null;
   cleanupPending?: boolean;
+  portReleasePending?: boolean;
   localState: string;
   publicState: string;
   localMessage: string;

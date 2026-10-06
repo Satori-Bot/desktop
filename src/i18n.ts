@@ -1,5 +1,18 @@
 export type Language = "en" | "zh";
 const zh: Record<string, string> = {
+  "Port is still unavailable": "端口仍不可用",
+  "Owned processes have stopped, but the port is not available. Retry Stop to check again, or edit this workspace to choose another port. No unrelated process will be stopped.":
+    "受管理的进程已停止，但端口仍不可用。可重试停止以再次检查，或编辑工作区选择其他端口。不会停止无关进程。",
+  "Background operation": "后台操作",
+  "Installing core…": "正在安装核心…",
+  "Restoring core…": "正在恢复核心…",
+  "Authorizing Cloudflare…": "正在授权 Cloudflare…",
+  "Setting up tunnel…": "正在配置隧道…",
+  "You can switch workspaces and stop services that are not busy.":
+    "可以切换工作区，并停止没有其他操作正在进行的服务。",
+  "Core installation completed": "核心安装完成",
+  "Core rollback completed": "核心回滚完成",
+  "Workspace stopped": "工作区已停止",
   "That workspace is no longer available. Nothing was removed.":
     "该工作区已不存在，未移除任何其他工作区。",
   "Stop this workspace before removing it.": "请先停止工作区，再将其移除。",

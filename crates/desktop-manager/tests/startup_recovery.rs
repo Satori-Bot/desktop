@@ -158,6 +158,7 @@ fn failed_start_retains_ownership_until_undrained_output_is_cleaned_up() {
     let after_refresh = manager.snapshot().statuses.remove(0);
     let edited = between_refreshes(|| manager.save_workspace(workspace.clone(), None));
     let deleted = between_refreshes(|| manager.delete_workspace(&workspace.id));
+    let quit_with_owned_cleanup = between_refreshes(|| manager.shutdown());
 
     // Collect observations before asserting so even the original broken
     // behavior releases the fixture-owned child and its inherited pipes.
@@ -179,6 +180,14 @@ fn failed_start_retains_ownership_until_undrained_output_is_cleaned_up() {
         "startup error hid pending cleanup"
     );
     assert!(after_refresh.cleanup_pending, "refresh hid pending cleanup");
+    assert!(
+        !after_refresh.port_release_pending,
+        "owned cleanup became an unrelated port warning"
+    );
+    assert!(
+        quit_with_owned_cleanup.is_err(),
+        "Quit discarded an owned cleanup failure"
+    );
     assert_eq!(
         after_failure.pid, None,
         "startup error advertised a dead leader"

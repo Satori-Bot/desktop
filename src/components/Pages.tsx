@@ -57,6 +57,7 @@ export function ConnectionsPage({
   status,
   run,
   busy,
+  maintenanceBusy = "",
   t,
   onEdit,
   onRemove,
@@ -67,6 +68,7 @@ export function ConnectionsPage({
   status?: Status;
   run: RunAction;
   busy: string;
+  maintenanceBusy?: string;
   t: Translate;
   onEdit: () => void;
   onRemove: () => void;
@@ -96,6 +98,7 @@ export function ConnectionsPage({
   const [loginOutput, setLoginOutput] = useState("");
   const [validation, setValidation] = useState("");
   const active = isActive(status);
+  const setupBusy = busy || maintenanceBusy;
   async function showConfig(isPublic: boolean, copyOnly = false) {
     const result = await run(copyOnly ? "copy-config" : "config", () =>
       api.connectionConfig(workspace.id, isPublic),
@@ -126,13 +129,20 @@ export function ConnectionsPage({
   async function createTunnel() {
     const result = await run(
       "tunnel-setup",
-      () => api.setupNamedTunnel(workspace.id, tunnelName, hostname),
+      async () => {
+        const saved = await api.setupNamedTunnel(
+          workspace.id,
+          tunnelName,
+          hostname,
+        );
+        onSaved(saved);
+        return saved;
+      },
       t("Operation completed"),
     );
     if (pageActive.current && result) {
       tunnelCreated.current = true;
       setConfirm(false);
-      onSaved(result);
     }
   }
   return (
@@ -319,7 +329,11 @@ export function ConnectionsPage({
           )}
         </Text>
         {workspace.access !== "named" ? (
-          <Button variant="light" onClick={onEdit} disabled={active || !!busy}>
+          <Button
+            variant="light"
+            onClick={onEdit}
+            disabled={active || !!setupBusy}
+          >
             {t("Configure access")}
           </Button>
         ) : (
@@ -328,8 +342,8 @@ export function ConnectionsPage({
               w="fit-content"
               variant="default"
               leftSection={<Globe2 size={16} />}
-              disabled={active || !!busy}
-              loading={busy === "cloudflare-login"}
+              disabled={active || !!setupBusy}
+              loading={setupBusy === "cloudflare-login"}
               onClick={async () => {
                 const output = await run(
                   "cloudflare-login",
@@ -350,14 +364,14 @@ export function ConnectionsPage({
                 label={t("Tunnel name")}
                 value={tunnelName}
                 onChange={(e) => setTunnelName(e.currentTarget.value)}
-                disabled={active || !!busy}
+                disabled={active || !!setupBusy}
               />
               <TextInput
                 label={t("Hostname")}
                 placeholder="mcp.example.com"
                 value={hostname}
                 onChange={(e) => setHostname(e.currentTarget.value)}
-                disabled={active || !!busy}
+                disabled={active || !!setupBusy}
               />
             </div>
             {validation && (
@@ -368,7 +382,7 @@ export function ConnectionsPage({
             <Button
               w="fit-content"
               leftSection={<Cloud size={16} />}
-              disabled={active || !!busy}
+              disabled={active || !!setupBusy}
               onClick={requestTunnel}
             >
               {t("Create tunnel and DNS")}
@@ -475,7 +489,7 @@ export function ConnectionsPage({
           label={t("Create tunnel and DNS")}
           onClose={() => setConfirm(false)}
           onConfirm={() => void createTunnel()}
-          busy={!!busy}
+          busy={!!setupBusy}
           t={t}
         />
       )}
@@ -802,6 +816,10 @@ export function SettingsPage({
   cloudflaredAvailable,
   run,
   busy,
+  maintenanceBusy,
+  runtimeBusy,
+  anyBusy,
+  runWorkspace,
   onQuit,
   onSettingsSaved,
   workspace,
@@ -815,6 +833,10 @@ export function SettingsPage({
   cloudflaredAvailable: boolean | null;
   run: RunAction;
   busy: string;
+  maintenanceBusy: string;
+  runtimeBusy: string;
+  anyBusy: boolean;
+  runWorkspace: RunAction;
   onQuit: () => void;
   onSettingsSaved: (settings: Settings) => void;
   workspace?: Workspace;
@@ -847,7 +869,11 @@ export function SettingsPage({
       return;
     }
     setValidation("");
-    const result = await run("install", () => api.installCore(version));
+    const result = await run(
+      "install",
+      () => api.installCore(version),
+      t("Core installation completed"),
+    );
     if (pageActive.current && result) setOutput(result);
   }
   return (
@@ -966,24 +992,33 @@ export function SettingsPage({
             value={version}
             onChange={(event) => setVersion(event.currentTarget.value)}
             error={validation}
-            disabled={!!busy || !available}
+            disabled={!!maintenanceBusy || !available}
           />
           <Button
             leftSection={<Download size={15} />}
             onClick={() => void install()}
-            loading={busy === "install"}
-            disabled={!available || (!!busy && busy !== "install")}
+            loading={maintenanceBusy === "install"}
+            disabled={
+              !available || (!!maintenanceBusy && maintenanceBusy !== "install")
+            }
           >
             {t("Install version")}
           </Button>
           <Button
             variant="default"
             onClick={async () => {
-              const result = await run("rollback", api.rollbackCore);
+              const result = await run(
+                "rollback",
+                api.rollbackCore,
+                t("Core rollback completed"),
+              );
               if (pageActive.current && result) setOutput(result);
             }}
-            loading={busy === "rollback"}
-            disabled={!available || (!!busy && busy !== "rollback")}
+            loading={maintenanceBusy === "rollback"}
+            disabled={
+              !available ||
+              (!!maintenanceBusy && maintenanceBusy !== "rollback")
+            }
           >
             {t("Roll back")}
           </Button>
@@ -1024,8 +1059,8 @@ export function SettingsPage({
           workspace={workspace}
           status={status}
           onSaved={onSaved}
-          run={run}
-          busy={busy}
+          run={runWorkspace}
+          busy={runtimeBusy}
           t={t}
         />
       )}
@@ -1034,7 +1069,7 @@ export function SettingsPage({
           color="red"
           variant="subtle"
           onClick={onQuit}
-          disabled={!!busy || !available}
+          disabled={anyBusy || !available}
         >
           {t("Quit application")}
         </Button>
@@ -1082,18 +1117,30 @@ function RuntimeOverride({
           ...argumentsText.split("\n").filter((value) => value.length > 0),
         ]
       : [];
-    const result = await run(
+    const submitted = draft;
+    await run(
       "save-runtime",
-      () => api.saveWorkspace({ ...workspace, coreCommand: command }),
+      async () => {
+        const saved = await api.saveWorkspace({
+          ...workspace,
+          coreCommand: command,
+        });
+        // Persisted state belongs to the parent, regardless of this editor's lifecycle.
+        // Commit it before the best-effort refresh, which may fail or finish much later.
+        onSaved(saved);
+        if (pageActive.current)
+          setDraft((current) =>
+            sameRuntime(current, submitted)
+              ? {
+                  executable: saved.coreCommand[0] ?? "",
+                  argumentsText: saved.coreCommand.slice(1).join("\n"),
+                }
+              : current,
+          );
+        return saved;
+      },
       t("Saved"),
     );
-    if (pageActive.current && result) {
-      setDraft({
-        executable: result.coreCommand[0] ?? "",
-        argumentsText: result.coreCommand.slice(1).join("\n"),
-      });
-      onSaved(result);
-    }
   }
   return (
     <Paper withBorder p="xl">

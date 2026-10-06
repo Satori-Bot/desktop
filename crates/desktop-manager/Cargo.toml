@@ -13,6 +13,7 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 dirs = "6"
 fs2 = "0.4"
+socket2 = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 sysinfo = "0.33"
 shell-words = "1"
@@ -25,4 +26,4 @@ libc = "0.2"
 signal-hook = "0.3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_Networking_WinSock"] }

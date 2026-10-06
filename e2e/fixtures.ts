@@ -14,6 +14,7 @@ type FixtureOptions = {
   tunnelFailure?: boolean;
   errors?: Record<string, string>;
   delays?: Record<string, number>;
+  heldCommands?: string[];
 };
 export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
   await page.addInitScript(
@@ -23,6 +24,7 @@ export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
       runningStatus,
       initialErrors,
       delays,
+      heldCommands,
     }) => {
       type Call = { command: string; args?: Record<string, unknown> };
       const state = {
@@ -31,6 +33,8 @@ export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
         errors: initialErrors,
         clipboard: [] as string[],
         logReads: 0,
+        heldCommands,
+        pending: {} as Record<string, Array<() => void>>,
       };
       const fixtureWindow = window as typeof window & {
         __TEST_FIXTURE__: typeof state;
@@ -55,6 +59,10 @@ export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
         convertFileSrc: (path) => path,
         invoke: async (command, args) => {
           state.calls.push({ command, args });
+          if (state.heldCommands.includes(command))
+            await new Promise<void>((resolve) => {
+              (state.pending[command] ??= []).push(resolve);
+            });
           if (delays[command])
             await new Promise((resolve) =>
               setTimeout(resolve, delays[command]),
@@ -117,6 +125,10 @@ export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
             ];
             return structuredClone(next);
           }
+          if (command === "install_core")
+            return `TEST FIXTURE: Core ${String(args?.version)} installed`;
+          if (command === "rollback_core")
+            return "TEST FIXTURE: Previous core restored";
           if (command === "retry_tunnel")
             return structuredClone(state.snapshot.statuses[0]);
           if (command === "save_settings") {
@@ -198,6 +210,7 @@ export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
       runningStatus: fixtureStatus,
       initialErrors: options.errors ?? {},
       delays: options.delays ?? {},
+      heldCommands: options.heldCommands ?? [],
     },
   );
 }
@@ -227,4 +240,23 @@ export async function changeError(page: Page, command: string, error?: string) {
     },
     { command, error },
   );
+}
+
+/** Release only the chosen fixture IPC; no timers or real desktop services are involved. */
+export async function resumeIpc(page: Page, command: string) {
+  await page.evaluate((command) => {
+    const fixture = (
+      window as unknown as {
+        __TEST_FIXTURE__: {
+          heldCommands: string[];
+          pending: Record<string, Array<() => void>>;
+        };
+      }
+    ).__TEST_FIXTURE__;
+    fixture.heldCommands = fixture.heldCommands.filter(
+      (item) => item !== command,
+    );
+    for (const resolve of fixture.pending[command] ?? []) resolve();
+    delete fixture.pending[command];
+  }, command);
 }

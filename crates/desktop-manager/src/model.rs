@@ -141,6 +141,8 @@ pub struct Status {
     pub pid: Option<u32>,
     #[serde(default)]
     pub cleanup_pending: bool,
+    #[serde(default)]
+    pub port_release_pending: bool,
     pub local_state: String,
     pub public_state: String,
     pub local_message: String,
@@ -162,6 +164,7 @@ impl Status {
             state: "stopped".into(),
             pid: None,
             cleanup_pending: false,
+            port_release_pending: false,
             local_state: "stopped".into(),
             public_state: if w.access == "local" {
                 "disabled"

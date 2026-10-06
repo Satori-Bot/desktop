@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    net::{TcpListener, TcpStream},
+    net::{Ipv4Addr, TcpListener},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -41,6 +41,80 @@ pub struct Manager {
     supervisor: Option<PathBuf>,
     shutting_down: AtomicBool,
 }
+// Reuse one availability check for allocation, startup and Stop confirmation.
+// Unix safely reuses TIME_WAIT on loopback; macOS also guards the wildcard.
+// Windows uses a conservative exclusive IPv4 wildcard reservation. Specific
+// binds can coexist with wildcard listeners, and refused connects can mean a
+// full queue, so neither a specific bind alone nor a failed connect is proof.
+fn local_listener(port: u16) -> std::io::Result<TcpListener> {
+    #[cfg(target_os = "macos")]
+    let (port, _wildcard_guard) = {
+        use socket2::{Domain, Protocol, Socket, Type};
+        use std::net::SocketAddr;
+        // BSD permits a reuse-enabled specific listener to coexist with a
+        // wildcard listener. Check the wildcard first, without ever listening
+        // on it, then keep that guard bound during the exact-endpoint check.
+        // This avoids stealing connections while retaining safe TIME_WAIT reuse.
+        let guard = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+        guard.set_reuse_address(true)?;
+        guard.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
+        (guard.local_addr()?.as_socket().unwrap().port(), guard)
+    };
+    #[cfg(not(windows))]
+    {
+        // std sets SO_REUSEADDR on Unix, never SO_REUSEPORT. An active
+        // listening socket on loopback or a dual-stack wildcard still wins.
+        TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+    }
+    #[cfg(windows)]
+    {
+        use socket2::{Domain, Protocol, Socket, Type};
+        use std::{net::SocketAddr, os::windows::io::AsRawSocket};
+        use windows_sys::Win32::Networking::WinSock::{
+            setsockopt, WSAGetLastError, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+        };
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+        let enabled: i32 = 1;
+        // Must be set before bind. Never use Windows SO_REUSEADDR: it can
+        // share/hijack another listener rather than prove the port is free.
+        let result = unsafe {
+            setsockopt(
+                socket.as_raw_socket() as _,
+                SOL_SOCKET,
+                SO_EXCLUSIVEADDRUSE,
+                (&enabled as *const i32).cast(),
+                std::mem::size_of_val(&enabled) as i32,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::from_raw_os_error(unsafe {
+                WSAGetLastError()
+            }));
+        }
+        socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
+        socket.listen(1)?;
+        Ok(socket.into())
+    }
+}
+
+fn confirm_port_release(port: u16) -> Result<()> {
+    let until = Instant::now() + Duration::from_secs(4);
+    loop {
+        match local_listener(port) {
+            Ok(listener) => {
+                drop(listener);
+                return Ok(());
+            }
+            Err(error) => {
+                if Instant::now() >= until {
+                    bail!("Owned processes are stopped, but release of 127.0.0.1:{port} could not be confirmed: {error}. Another process or pending TCP state may hold it. Retry Stop or choose another port; no unrelated process was terminated.");
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn validate_access(w: &Workspace, starting: bool) -> Result<()> {
     if !["local", "quick", "named", "frp"].contains(&w.access.as_str()) {
         bail!("Unknown access mode");
@@ -211,7 +285,7 @@ impl Manager {
             w.port = (28766..60000)
                 .find(|p| {
                     !c.workspaces.iter().any(|x| x.id != w.id && x.port == *p)
-                        && TcpListener::bind(("127.0.0.1", *p)).is_ok()
+                        && local_listener(*p).is_ok()
                 })
                 .context("No available local port")?;
         }
@@ -324,7 +398,7 @@ impl Manager {
             {
                 bail!("OAuth credentials are missing; repair the workspace configuration");
             }
-            let port=TcpListener::bind(("127.0.0.1",w.port)).context("Port is already in use. Stop its owner or choose another port; no unrelated process was terminated.")?;
+            let port=local_listener(w.port).context("Port is already in use. Stop its owner or choose another port; no unrelated process was terminated.")?;
             drop(port);
             let state = self.storage.state_dir(id)?;
             events::begin_run(&state)?;
@@ -586,18 +660,7 @@ impl Manager {
             }
             session.runtime = None;
             *slot.run_started_ms.lock().unwrap() = None;
-            let until = Instant::now() + Duration::from_secs(4);
-            while TcpStream::connect_timeout(
-                &format!("127.0.0.1:{}", w.port).parse().unwrap(),
-                Duration::from_millis(100),
-            )
-            .is_ok()
-            {
-                if Instant::now() >= until {
-                    bail!("Managed process exited, but port is still in use. Stop is not confirmed; another process may own it.");
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
+            confirm_port_release(w.port)?;
             Ok(())
         })();
         if let Err(e) = result {
@@ -610,7 +673,8 @@ impl Manager {
                 s.local_state = "error".into();
                 s.local_message = e.to_string();
                 s.pid = live_pid;
-                s.cleanup_pending = true;
+                s.cleanup_pending = session.runtime.is_some() || session.tunnel.is_some();
+                s.port_release_pending = !s.cleanup_pending;
                 s.public_endpoint.clear();
                 s.public_state = if session.tunnel.is_some() {
                     "error"
@@ -802,7 +866,7 @@ impl Manager {
         push(
             "Core executable",
             core::resolve(&w, &self.config())
-                .and_then(|args| core::version_output(&args, &self.storage.home)),
+                .and_then(|args| core::version_output(&args, Path::new(&w.path))),
         );
         push("Local MCP protocol", core::probe(&w, &s, false));
         if w.access != "local" {
@@ -980,12 +1044,12 @@ impl Manager {
         *config = next;
         Ok(w)
     }
-    /// Quitting closes admission before enumerating services. If a busy
-    /// operation prevents confirmation, keep the app open and allow a retry.
+    /// Quitting closes admission before enumerating services. Owned cleanup
+    /// must finish, but an unrelated listener cannot keep the desktop hostage.
     pub fn shutdown(&self) -> Result<()> {
         let _guard=self.install_lock.try_lock().map_err(|_|anyhow!("An installation or Cloudflare setup is in progress. Wait for it to finish before quitting."))?;
         self.shutting_down.store(true, Ordering::SeqCst);
-        let result = self.stop_all_inner();
+        let result = self.stop_all_inner(false);
         if result.is_err() {
             self.shutting_down.store(false, Ordering::SeqCst);
         }
@@ -993,9 +1057,9 @@ impl Manager {
     }
     pub fn stop_all(&self) -> Result<()> {
         let _guard=self.install_lock.try_lock().map_err(|_|anyhow!("An installation or Cloudflare setup is in progress. Wait for it to finish before stopping services."))?;
-        self.stop_all_inner()
+        self.stop_all_inner(true)
     }
-    fn stop_all_inner(&self) -> Result<()> {
+    fn stop_all_inner(&self, require_port_release: bool) -> Result<()> {
         let mut errors = vec![];
         for w in self.config().workspaces {
             let slot = self.slot(&w);
@@ -1004,10 +1068,22 @@ impl Manager {
                 .try_lock()
                 .map(|s| s.runtime.is_some() || s.tunnel.is_some())
                 .unwrap_or(true);
-            let cleanup_pending = slot.status.lock().unwrap().cleanup_pending;
-            if managed || cleanup_pending {
+            let status = slot.status.lock().unwrap().clone();
+            if managed
+                || status.cleanup_pending
+                || (require_port_release && status.port_release_pending)
+            {
                 if let Err(e) = self.stop(&w.id) {
-                    errors.push(e.to_string());
+                    // A stale port-only warning must never mask a concurrent
+                    // lifecycle operation or a newly retained owned handle.
+                    let port_only = slot.session.try_lock().is_ok_and(|session| {
+                        session.runtime.is_none()
+                            && session.tunnel.is_none()
+                            && slot.status.lock().unwrap().port_release_pending
+                    });
+                    if require_port_release || !port_only {
+                        errors.push(e.to_string());
+                    }
                 }
             }
         }
@@ -1074,6 +1150,83 @@ mod admission_regressions {
         assert_eq!(status.activity_state, "unknown");
         assert!(slot.session.lock().unwrap().runtime.is_none());
         manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn quit_finishes_owned_cleanup_without_claiming_an_unrelated_port_was_released() {
+        let (directory, manager, workspace) = fixture();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, workspace.port)).unwrap();
+        let args = python_command("import time; time.sleep(60)".into());
+        let mut command = std::process::Command::new(&args[0]);
+        command.args(&args[1..]);
+        let mut process = ManagedProcess::spawn(
+            &mut command,
+            directory.path().join("owned.log"),
+            Secrets::default(),
+        )
+        .unwrap();
+        assert!(process.alive(), "owned fixture did not remain running");
+        let slot = manager.slot(&workspace);
+        manager.update(&slot, |status| {
+            status.state = "running".into();
+            status.pid = Some(process.pid());
+        });
+        slot.session.lock().unwrap().runtime = Some(process);
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            match manager.shutdown() {
+                Err(error)
+                    if error.to_string().contains("operation is in progress")
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10))
+                }
+                result => {
+                    result.unwrap();
+                    break;
+                }
+            }
+        }
+        assert!(slot.session.lock().unwrap().runtime.is_none());
+        let status = slot.status.lock().unwrap();
+        assert!(status.port_release_pending);
+        assert!(!status.cleanup_pending);
+        assert_eq!(status.pid, None);
+        assert!(std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, workspace.port)),
+            Duration::from_millis(200)
+        )
+        .is_ok());
+        drop(listener);
+    }
+
+    #[test]
+    fn stale_port_warning_does_not_hide_an_inflight_operation_from_quit() {
+        let (_directory, manager, workspace) = fixture();
+        let slot = manager.slot(&workspace);
+        manager.update(&slot, |status| status.port_release_pending = true);
+        let operation = slot.session.lock().unwrap();
+        assert!(manager.shutdown().is_err());
+        assert!(!manager.shutting_down.load(Ordering::SeqCst));
+        drop(operation);
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
+    fn availability_probe_uses_platform_safe_socket_reuse() {
+        let listener = local_listener(0).unwrap();
+        assert_eq!(
+            socket2::SockRef::from(&listener).reuse_address().unwrap(),
+            cfg!(unix)
+        );
+        assert_eq!(
+            listener.local_addr().unwrap().ip(),
+            if cfg!(windows) {
+                Ipv4Addr::UNSPECIFIED
+            } else {
+                Ipv4Addr::LOCALHOST
+            }
+        );
     }
 
     #[test]

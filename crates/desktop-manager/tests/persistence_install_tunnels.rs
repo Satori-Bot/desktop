@@ -296,6 +296,32 @@ mod mocked_tools {
     }
 
     #[test]
+    fn restricted_gui_path_discovers_standard_user_tools() {
+        let mut h = Harness::new();
+        let standard = h.root.path().join(".local/bin");
+        fs::create_dir_all(&standard).unwrap();
+        for name in ["uv", "cloudflared", "coding-tools-mcp"] {
+            let installed = h.tool(name, "raise SystemExit(99)\n");
+            fs::rename(installed, standard.join(name)).unwrap();
+        }
+        let home = h.root.path().to_path_buf();
+        h.set("HOME", home);
+        h.set("PATH", h.bin());
+        for name in ["uv", "cloudflared", "coding-tools-mcp"] {
+            assert_eq!(
+                core::find_program(name),
+                Some(standard.join(name)),
+                "GUI discovery missed {name}"
+            );
+        }
+        let manager = Manager::open(h.home()).unwrap();
+        let snapshot = manager.snapshot();
+        assert!(snapshot.core_available);
+        assert!(snapshot.cloudflared_available);
+        manager.shutdown().unwrap();
+    }
+
+    #[test]
     fn relative_path_discovery_returns_a_stable_absolute_executable() {
         let mut h = Harness::new();
         let local = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();

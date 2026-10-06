@@ -26,6 +26,8 @@ History displays the core's real structured events, including tool name, timesta
 - **Named Tunnel:** a reusable HTTPS hostname. Use an existing tunnel token/hostname, or explicitly authorize `cloudflared tunnel login`, then create a named tunnel and DNS route in the guided UI. The latter requires a domain on your Cloudflare account. The app confirms before creating DNS and never silently replaces another route.
 - **FRP:** reuse an externally managed FRP route. The app does not manage `frpc`.
 
+For native GUI launches, helper discovery first honors PATH, then checks `~/.local/bin` and standard Homebrew directories (`/opt/homebrew/bin` before `/usr/local/bin` in Apple Silicon builds; the reverse in Intel builds). Linux also checks `/usr/local/bin` and `/home/linuxbrew/.linuxbrew/bin`. Only uv, cloudflared and the default core receive these fallbacks. The app never sources shell profiles or workspace configuration to locate them. Explicit relative core executable paths and relative arguments are resolved from the workspace folder.
+
 Install [cloudflared](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/) separately. A failed tunnel leaves local MCP running. “Connected” means cloudflared connected; run diagnostics to verify public discovery. An authenticated MCP client must still complete its own authorization.
 
 A Cloudflare account certificate from browser login can manage that account's tunnels. Tunnel credentials are limited to one tunnel. These remain on the user's computer. Tokens are passed through the process environment rather than command-line arguments.
@@ -91,7 +93,7 @@ CI covers Linux/macOS/Windows manager/native builds, Python packaging, frontend 
 
 Configuration lives in `~/.coding-tools-mcp-desktop/desktop-v2.json`. On Unix the private directory uses mode 0700 and files use 0600; Windows uses the user's profile ACL. Existing v1 profiles/secrets are backed up before migration and originals are retained. Invalid/future configuration fails with a useful error rather than resetting workspaces. Old running processes are never adopted by PID or killed: stop them in the old app before starting the migrated workspace.
 
-Closing the window hides it in the tray by default. **Stop services and quit** stops only owned processes and verifies port release. Crashes are detected, and retry/restart is explicit. Running workspaces cannot be reconfigured. Managed core installation verifies a new version before selecting it; failure leaves the prior environment selected. Rollback changes the selected environment without interrupting running workspaces.
+Closing the window hides it in the tray by default. **Stop** cleans up only owned processes and checks port release. An unconfirmed port check stays visible, with retry or safe port editing available after owned cleanup. **Stop services and quit** requires owned-process cleanup; an unrelated listener does not prevent quitting. Crashes are detected, and retry/restart is explicit. Running workspaces cannot be reconfigured. Managed core installation verifies a new version before selecting it; failure leaves the prior environment selected. Rollback changes the selected environment without interrupting running workspaces.
 
 Runtime/tunnel logs rotate at 1 MiB with one backup and are read with bounded cursors. Core history keeps the current and three previous launches, each using the core's bounded four-file journal. Diagnostics export excludes raw logs, paths, addresses, credentials, commands, tool inputs and outputs.
 

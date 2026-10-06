@@ -34,37 +34,105 @@ pub fn is_executable_file(path: &Path) -> bool {
         true
     }
 }
+// Finder/Dock launches do not inherit a shell's PATH. Search only established
+// per-user/package-manager executable directories for the three managed tools;
+// never source shell profiles or search the selected workspace for helpers.
+fn standard_program_dirs(name: &str, home: Option<&Path>, os: &str, arch: &str) -> Vec<PathBuf> {
+    if !matches!(name, "uv" | "cloudflared" | "coding-tools-mcp") {
+        return vec![];
+    }
+    let mut directories = Vec::new();
+    if let Some(home) = home.filter(|home| home.is_absolute()) {
+        directories.push(home.join(".local/bin"));
+    }
+    match os {
+        "macos" => {
+            if arch == "aarch64" {
+                directories.push("/opt/homebrew/bin".into());
+                directories.push("/usr/local/bin".into());
+            } else {
+                directories.push("/usr/local/bin".into());
+                directories.push("/opt/homebrew/bin".into());
+            }
+        }
+        "linux" => {
+            directories.push("/usr/local/bin".into());
+            directories.push("/home/linuxbrew/.linuxbrew/bin".into());
+        }
+        _ => {}
+    }
+    directories
+}
+
+fn find_in_directories(
+    name: &str,
+    directories: impl IntoIterator<Item = PathBuf>,
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let suffixes = [".exe", ".cmd", ".bat", ".com", ""];
+    #[cfg(not(windows))]
+    let suffixes = [""];
+    directories.into_iter().find_map(|directory| {
+        // Freeze relative PATH entries at discovery time, before any child uses
+        // a workspace cwd. Keep symlink spellings: venv launchers depend on them.
+        let directory = if directory.is_absolute() {
+            directory
+        } else {
+            cwd?.join(directory)
+        };
+        suffixes.iter().find_map(|suffix| {
+            let path = directory.join(format!("{name}{suffix}"));
+            is_executable_file(&path).then_some(path)
+        })
+    })
+}
+
 pub fn find_program(name: &str) -> Option<PathBuf> {
     let p = Path::new(name);
     if p.is_absolute() {
         return is_executable_file(p).then(|| p.to_path_buf());
     }
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path)
-            .flat_map(|d| {
-                #[cfg(windows)]
-                let suffixes = vec![".exe", ".cmd", ".bat", ".com", ""];
-                #[cfg(not(windows))]
-                let suffixes = vec![""];
-                suffixes
-                    .into_iter()
-                    .map(move |s| d.join(format!("{name}{s}")))
-            })
-            .find(|p| is_executable_file(p))
-            // Preserve symlink spellings (venv launchers can depend on them),
-            // but never let a relative PATH entry resolve again in a workspace.
-            .and_then(|p| {
-                if p.is_absolute() {
-                    Some(p)
-                } else {
-                    std::env::current_dir().ok().map(|cwd| cwd.join(p))
-                }
-            })
-    })
+    let path = std::env::var_os("PATH");
+    let standard = standard_program_dirs(
+        name,
+        dirs::home_dir().as_deref(),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
+    find_in_directories(
+        name,
+        path.iter().flat_map(std::env::split_paths).chain(standard),
+        std::env::current_dir().ok().as_deref(),
+    )
+}
+
+fn workspace_program(program: &str, directory: &Path) -> Result<PathBuf> {
+    let path = Path::new(program);
+    if path.is_absolute() || path.components().count() == 1 {
+        return Ok(path.to_path_buf());
+    }
+    // Command's relative-program/current_dir interaction is platform-specific.
+    // Resolve explicit relative paths once, identically for launch and probes.
+    let directory = if directory.is_absolute() {
+        directory.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(directory)
+    };
+    let path = directory.join(path);
+    if !path.is_absolute() {
+        bail!("Use an absolute or workspace-relative core executable path");
+    }
+    Ok(path)
 }
 pub fn resolve(w: &Workspace, config: &Config) -> Result<Vec<String>> {
     if !w.core_command.is_empty() {
-        return Ok(w.core_command.clone());
+        let mut command = w.core_command.clone();
+        command[0] = workspace_program(&command[0], Path::new(&w.path))?
+            .to_str()
+            .context("Core executable path must use valid UTF-8 characters")?
+            .into();
+        return Ok(command);
     }
     if let Some(path) = &config.managed_core {
         if !Path::new(path).is_absolute() || !is_executable_file(Path::new(path)) {
@@ -75,7 +143,7 @@ pub fn resolve(w: &Workspace, config: &Config) -> Result<Vec<String>> {
     if let Some(path) = find_program("coding-tools-mcp") {
         return Ok(vec![path.to_string_lossy().into()]);
     }
-    bail!("Python core is not installed. Open Settings and install the pinned core, or select an existing coding-tools-mcp executable.")
+    bail!("Python core was not found in PATH or standard user/Homebrew locations. Open Settings and install the pinned core, or select an existing coding-tools-mcp executable.")
 }
 pub fn command(w: &Workspace, secrets: &Secrets, config: &Config, state: &Path) -> Result<Command> {
     command_supervised(w, secrets, config, state, None)
@@ -220,7 +288,7 @@ pub fn version_output(args: &[String], dir: &Path) -> Result<String> {
     }
     let tmp = tempfile::tempdir()?;
     let log = tmp.path().join("probe.log");
-    let mut command = Command::new(&args[0]);
+    let mut command = Command::new(workspace_program(&args[0], dir)?);
     command
         .args(&args[1..])
         .arg("--version")
@@ -257,7 +325,7 @@ pub fn install(storage: &Storage, version: &str) -> Result<String> {
     {
         bail!("Enter an exact published version such as 0.5.0");
     }
-    let uv=find_program("uv").context("Install uv from https://docs.astral.sh/uv/getting-started/installation/ before installing a managed core")?;
+    let uv=find_program("uv").context("uv was not found in PATH or standard user/Homebrew locations. Install uv from https://docs.astral.sh/uv/getting-started/installation/ before installing a managed core")?;
     let env = storage
         .home
         .join("cores")
@@ -315,6 +383,107 @@ pub fn install(storage: &Storage, version: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn executable(directory: &Path, name: &str) -> PathBuf {
+        std::fs::create_dir_all(directory).unwrap();
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
+        let path = directory.join(format!("{name}{suffix}"));
+        std::fs::write(&path, b"fixture, never executed").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn standard_tool_directories_are_bounded_and_platform_specific() {
+        let home = tempfile::tempdir().unwrap();
+        for name in ["uv", "cloudflared", "coding-tools-mcp"] {
+            assert_eq!(
+                standard_program_dirs(name, Some(home.path()), "macos", "aarch64"),
+                vec![
+                    home.path().join(".local/bin"),
+                    PathBuf::from("/opt/homebrew/bin"),
+                    PathBuf::from("/usr/local/bin")
+                ]
+            );
+            assert_eq!(
+                standard_program_dirs(name, Some(home.path()), "macos", "x86_64"),
+                vec![
+                    home.path().join(".local/bin"),
+                    PathBuf::from("/usr/local/bin"),
+                    PathBuf::from("/opt/homebrew/bin")
+                ]
+            );
+            assert_eq!(
+                standard_program_dirs(name, Some(home.path()), "linux", "x86_64"),
+                vec![
+                    home.path().join(".local/bin"),
+                    PathBuf::from("/usr/local/bin"),
+                    PathBuf::from("/home/linuxbrew/.linuxbrew/bin")
+                ]
+            );
+            assert_eq!(
+                standard_program_dirs(name, Some(home.path()), "windows", "x86_64"),
+                vec![home.path().join(".local/bin")]
+            );
+        }
+        for name in ["unrelated-helper", "./uv", "../cloudflared"] {
+            assert!(standard_program_dirs(name, Some(home.path()), "macos", "aarch64").is_empty());
+        }
+        assert!(
+            standard_program_dirs("uv", Some(Path::new("relative-home")), "windows", "x86_64")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn discovery_preserves_path_then_standard_directory_precedence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("path");
+        let user = directory.path().join("user");
+        let native_brew = directory.path().join("native-brew");
+        let other_brew = directory.path().join("other-brew");
+        let ordered = vec![
+            path.clone(),
+            user.clone(),
+            native_brew.clone(),
+            other_brew.clone(),
+        ];
+        let expected: Vec<_> = ordered.iter().map(|d| executable(d, "uv")).collect();
+        for selected in expected {
+            assert_eq!(
+                find_in_directories("uv", ordered.clone(), None),
+                Some(selected.clone())
+            );
+            std::fs::remove_file(selected).unwrap();
+        }
+        assert_eq!(find_in_directories("uv", ordered, None), None);
+        // Neither a missing search path nor standard fallback adds cwd.
+        let untrusted = executable(directory.path(), "uv");
+        assert_eq!(find_in_directories("uv", [], Some(directory.path())), None);
+        assert_eq!(find_program(untrusted.to_str().unwrap()), Some(untrusted));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_non_executable_and_preserves_symlink_spelling() {
+        let directory = tempfile::tempdir().unwrap();
+        let shadow = directory.path().join("shadow");
+        std::fs::create_dir(&shadow).unwrap();
+        std::fs::write(shadow.join("uv"), b"not executable").unwrap();
+        let installed = executable(&directory.path().join("real"), "uv");
+        let bin = directory.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let symlink = bin.join("uv");
+        std::os::unix::fs::symlink(installed, &symlink).unwrap();
+        assert_eq!(
+            find_in_directories("uv", [shadow, bin], None),
+            Some(symlink)
+        );
+    }
+
     #[test]
     fn launched_core_has_documented_telemetry_opt_out() {
         let dir = tempfile::tempdir().unwrap();
