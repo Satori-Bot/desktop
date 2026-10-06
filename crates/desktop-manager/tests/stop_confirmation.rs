@@ -36,6 +36,119 @@ fn workspace(manager: &Manager, directory: &std::path::Path, port: u16) -> Works
     manager.save_workspace(workspace, None).unwrap()
 }
 
+#[cfg(windows)]
+fn log_windows_binding_evidence(listener: &TcpListener) {
+    use std::io::Write;
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{
+        setsockopt, WSAGetLastError, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+    };
+
+    fn exclusive_bind(address: SocketAddr) -> std::io::Result<()> {
+        let socket = Socket::new(
+            Domain::for_address(address),
+            Type::STREAM,
+            Some(Protocol::TCP),
+        )?;
+        if address.is_ipv6() {
+            socket.set_only_v6(false)?;
+        }
+        let enabled: i32 = 1;
+        let result = unsafe {
+            setsockopt(
+                socket.as_raw_socket() as _,
+                SOL_SOCKET,
+                SO_EXCLUSIVEADDRUSE,
+                (&enabled as *const i32).cast(),
+                std::mem::size_of_val(&enabled) as i32,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::from_raw_os_error(unsafe {
+                WSAGetLastError()
+            }));
+        }
+        // Never listen on these probes or receive another listener's traffic.
+        socket.bind(&address.into())
+    }
+
+    let endpoint = listener.local_addr().unwrap();
+    let reference = socket2::SockRef::from(listener);
+    // Direct stderr keeps the passing IPv6-only control's evidence in CI logs.
+    let _ = writeln!(
+        std::io::stderr(),
+        "Windows fixture {endpoint}: reuse={:?}, only_v6={:?}",
+        reference.reuse_address(),
+        endpoint.is_ipv6().then(|| reference.only_v6())
+    );
+    let port = endpoint.port();
+    for address in [
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED.to_ipv6_mapped(), port)),
+    ] {
+        let _ = writeln!(
+            std::io::stderr(),
+            "Windows fixture {endpoint}: exclusive bind-only {address}: {:?}",
+            exclusive_bind(address)
+        );
+    }
+
+    // Record original manager outcomes and bind-only evidence first: an
+    // accepted IPv4 connection could itself affect later port reservations.
+    let client = match TcpStream::connect_timeout(
+        &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        Duration::from_millis(250),
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "Windows fixture {endpoint}: IPv4 connect: {error:?}"
+            );
+            return;
+        }
+    };
+    let client_address = client.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        match listener.accept() {
+            Ok((accepted, peer)) => {
+                let peer_ipv4 = match peer.ip() {
+                    IpAddr::V4(ip) => Some(ip),
+                    IpAddr::V6(ip) => ip.to_ipv4_mapped(),
+                };
+                let matches_client =
+                    peer_ipv4 == Some(Ipv4Addr::LOCALHOST) && peer.port() == client_address.port();
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "Windows fixture {endpoint}: accepted IPv4 client {client_address} as {peer}, matches_client={matches_client}, local={:?}",
+                    accepted.local_addr(),
+                );
+                // Abort only this fixture-owned connection to avoid TIME_WAIT.
+                socket2::SockRef::from(&accepted)
+                    .set_linger(Some(Duration::ZERO))
+                    .unwrap();
+                drop(accepted);
+                break;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "Windows fixture {endpoint}: did not accept IPv4 client {client_address}: {error:?}"
+                );
+                break;
+            }
+        }
+    }
+    listener.set_nonblocking(false).unwrap();
+    drop(client);
+}
+
 fn assert_unconfirmed(manager: &Manager, workspace: &Workspace) {
     let start = Instant::now();
     let result = manager.stop(&workspace.id);
@@ -159,11 +272,15 @@ fn ipv4_wildcard_and_dual_stack_listeners_block_the_managed_endpoint() {
         let listener = listener(address, false);
         let port = listener.local_addr().unwrap().port();
         let workspace = workspace(&manager, directory.path(), port);
-        assert!(manager
-            .start(&workspace.id)
-            .unwrap_err()
-            .to_string()
-            .contains("Port is already in use"));
+        let start_error = manager.start(&workspace.id).unwrap_err();
+        if !start_error.to_string().contains("Port is already in use") {
+            // Keep the independent Stop result in a failed startup assertion:
+            // an admission race differs from falsely confirming port release.
+            let stop_result = manager.stop(&workspace.id);
+            #[cfg(windows)]
+            log_windows_binding_evidence(&listener);
+            panic!("Listener {address} on port {port}: startup returned {start_error:#}; subsequent Stop returned {stop_result:?}");
+        }
         assert_unconfirmed(&manager, &workspace);
         manager.shutdown().unwrap();
         assert!(TcpStream::connect_timeout(
@@ -188,11 +305,15 @@ fn reusable_wildcard_listeners_are_not_shadowed_by_the_availability_probe() {
         let listener = listener_with_reuse(address, false, true);
         let port = listener.local_addr().unwrap().port();
         let workspace = workspace(&manager, directory.path(), port);
-        assert!(manager
-            .start(&workspace.id)
-            .unwrap_err()
-            .to_string()
-            .contains("Port is already in use"));
+        let start_error = manager.start(&workspace.id).unwrap_err();
+        if !start_error.to_string().contains("Port is already in use") {
+            // Keep the independent Stop result in a failed startup assertion:
+            // an admission race differs from falsely confirming port release.
+            let stop_result = manager.stop(&workspace.id);
+            #[cfg(windows)]
+            log_windows_binding_evidence(&listener);
+            panic!("Listener {address} on port {port}: startup returned {start_error:#}; subsequent Stop returned {stop_result:?}");
+        }
         assert_unconfirmed(&manager, &workspace);
         manager.shutdown().unwrap();
         assert!(TcpStream::connect_timeout(
@@ -214,6 +335,8 @@ fn ipv6_only_listener_is_independent_of_the_managed_ipv4_endpoint() {
     assert_eq!(status.state, "stopped");
     assert!(!status.port_release_pending);
     manager.shutdown().unwrap();
+    #[cfg(windows)]
+    log_windows_binding_evidence(&listener);
     assert!(TcpStream::connect_timeout(&endpoint, Duration::from_millis(200)).is_ok());
 }
 
