@@ -25,7 +25,7 @@ class NativeLauncherTests(unittest.TestCase):
             patch('sys.argv', ['coding-tools-mcp-desktop', '--argument']),
         ):
             self.assertEqual(main(), 0)
-            spawn.assert_called_once_with(['/app with spaces', '--argument'], close_fds=True)
+            spawn.assert_called_once_with([str(Path('/app with spaces')), '--argument'], close_fds=True)
 
     def test_missing_native_app_has_actionable_error(self):
         with (

@@ -32,7 +32,7 @@ A Cloudflare account certificate from browser login can manage that account's tu
 
 ## Development
 
-Requirements: Node.js 22+, Rust 1.85.1+, Python 3.11+ for the compatibility launcher/tests, and [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). The lockfile pins versions compatible with Rust 1.85.
+Requirements: Node.js 22.12+ (or supported newer LTS), Rust 1.85.1+, Python 3.11+ for the compatibility launcher/tests, and [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). The lockfile pins versions compatible with Rust 1.85.
 
 ```sh
 npm ci

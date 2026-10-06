@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 parser = argparse.ArgumentParser()
@@ -44,4 +45,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"coding-tools-mcp","version":"0.5.0"}}}')
 
-ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer normally reverse-resolves the bound address before listen.
+        # setup-python on macOS runners can spend over 30 seconds resolving
+        # 127.0.0.1 (actions/setup-python#1223). This local fixture needs no DNS.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+print('fixture: entering loopback HTTP bind', flush=True)
+server = LoopbackHTTPServer((args.host, args.port), Handler)
+print('fixture: loopback HTTP ready', flush=True)
+server.serve_forever()

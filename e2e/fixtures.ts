@@ -83,6 +83,7 @@ export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
                 ...runningStatus,
                 workspaceId: saved.id,
                 state: "stopped",
+                pid: null,
                 localState: "offline",
                 localEndpoint: "",
               },
@@ -145,9 +146,11 @@ export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
             return JSON.stringify({ fixture: true, credentials: "[REDACTED]" });
           if (command === "logs") {
             state.logReads += 1;
+            // A repeat read from the same cursor is idempotent, like the real log file.
+            const nextCursor = Number(args?.cursor ?? 0) + 1;
             return {
-              text: `TEST FIXTURE ${args?.kind} line ${state.logReads}\n`,
-              cursor: state.logReads,
+              text: `TEST FIXTURE ${args?.kind} line ${nextCursor}\n`,
+              cursor: nextCursor,
               truncated: false,
             };
           }

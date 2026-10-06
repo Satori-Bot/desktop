@@ -37,9 +37,8 @@ test("real browser without Tauri has no fake workspace or telemetry", async ({
   await expect(page.getByRole("alert")).toContainText(
     "Browser preview only. No services are running here.",
   );
-  await expect(
-    page.getByText("BROWSER PREVIEW", { exact: false }),
-  ).toBeVisible();
+  await expect(page.locator(".main-footer")).toBeVisible();
+  await expect(page.locator(".main-footer")).toContainText("BROWSER PREVIEW");
   await expect(page.getByText("Atlas workspace")).toHaveCount(0);
   await expect(page.getByText("CPU usage")).toHaveCount(0);
   await screenshot(page, "browser-unavailable");
@@ -312,15 +311,15 @@ test("diagnostics, incremental logs and redacted download are explicit actions",
   await expect(
     page.getByText("TEST FIXTURE runtime line 2", { exact: false }),
   ).toBeVisible();
-  expect((await ipcCalls(page, "logs"))[1].args).toMatchObject({
+  expect((await ipcCalls(page, "logs")).at(-1)?.args).toMatchObject({
     cursor: 1,
     kind: "runtime",
   });
   await page.getByRole("radio", { name: "Tunnel logs" }).click();
   await expect(
-    page.getByText("TEST FIXTURE tunnel line 3", { exact: false }),
+    page.getByText("TEST FIXTURE tunnel line 1", { exact: false }),
   ).toBeVisible();
-  expect((await ipcCalls(page, "logs"))[2].args).toMatchObject({
+  expect((await ipcCalls(page, "logs")).at(-1)?.args).toMatchObject({
     cursor: 0,
     kind: "tunnel",
   });

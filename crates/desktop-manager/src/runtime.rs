@@ -265,7 +265,11 @@ impl Manager {
             let mut cmd = core::command(&w, &secrets, &self.config(), &state)?;
             let mut process =
                 ManagedProcess::spawn(&mut cmd, state.join("runtime.log"), secrets.clone())?;
-            let deadline = Instant::now() + Duration::from_secs(20);
+            // CPython's HTTPServer performs reverse-DNS lookup before listen.
+            // Some macOS resolver configurations take >30s; keep protocol
+            // readiness mandatory while allowing that supported core to finish.
+            let startup_budget = if cfg!(target_os = "macos") { 60 } else { 20 };
+            let deadline = Instant::now() + Duration::from_secs(startup_budget);
             let mut last = "Waiting for MCP readiness".to_string();
             let mut ready = false;
             while Instant::now() < deadline {
@@ -278,7 +282,10 @@ impl Manager {
                         ready = true;
                         break;
                     }
-                    Err(e) => last = e.to_string(),
+                    Err(e) => last = format!("{e:#}"),
+                }
+                if cfg!(target_os = "macos") && process.started.elapsed().as_secs() >= 10 {
+                    self.update(&slot,|s|s.local_message="Waiting for the Python core to finish starting. macOS hostname lookup can take about 30 seconds; readiness is still being checked.".into());
                 }
                 thread::sleep(Duration::from_millis(150));
             }
@@ -310,7 +317,15 @@ impl Manager {
             Ok(())
         })();
         if let Err(e) = result {
-            let message = events::redact(&e.to_string(), &secrets);
+            let mut message = events::redact(&format!("{e:#}"), &secrets);
+            if let Ok(log) = self.logs(id, "runtime", 0) {
+                let lines: Vec<_> = log.text.lines().rev().take(8).collect();
+                let tail = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
+                if !tail.trim().is_empty() {
+                    message.push_str("\nRecent runtime output:\n");
+                    message.push_str(&tail.chars().take(4000).collect::<String>());
+                }
+            }
             self.update(&slot, |s| {
                 s.state = "error".into();
                 s.local_state = "error".into();
