@@ -27,6 +27,7 @@ export interface Status {
   workspaceId: string;
   state: "stopped" | "starting" | "running" | "error" | "stopping";
   pid: number | null;
+  cleanupPending?: boolean;
   localState: string;
   publicState: string;
   localMessage: string;
@@ -51,6 +52,14 @@ export interface Activity {
   errorCategory: string | null;
   runtimeId: string;
 }
+export const activityOutcome = (call: Activity) =>
+  call.outcome === "interrupted"
+    ? "interrupted"
+    : !call.finishedAt
+      ? "pending"
+      : ["success", "ok", "completed"].includes(call.outcome)
+        ? "success"
+        : "failed";
 export interface Snapshot {
   workspaces: Workspace[];
   statuses: Status[];
@@ -86,7 +95,9 @@ export const blankWorkspace = (): Workspace => ({
 });
 export const isActive = (s?: Status) =>
   !!s &&
-  (s.pid !== null || ["running", "starting", "stopping"].includes(s.state));
+  (s.cleanupPending ||
+    s.pid !== null ||
+    ["running", "starting", "stopping"].includes(s.state));
 export const errorText = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 export interface AuthDetails {

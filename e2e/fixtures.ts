@@ -4,9 +4,11 @@ import {
   fixtureSnapshot,
   fixtureStatus,
 } from "../src/test/fixtures";
-import type { Snapshot } from "../src/types";
+import type { Activity, Snapshot } from "../src/types";
 
 type FixtureOptions = {
+  snapshot?: Snapshot;
+  activity?: Activity[];
   empty?: boolean;
   stopped?: boolean;
   tunnelFailure?: boolean;
@@ -191,8 +193,8 @@ export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
       else labelFixture();
     },
     {
-      initialSnapshot: fixtureSnapshot(options),
-      initialCalls: fixtureCalls,
+      initialSnapshot: options.snapshot ?? fixtureSnapshot(options),
+      initialCalls: options.activity ?? fixtureCalls,
       runningStatus: fixtureStatus,
       initialErrors: options.errors ?? {},
       delays: options.delays ?? {},

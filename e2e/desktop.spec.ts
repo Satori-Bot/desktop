@@ -1,11 +1,11 @@
 import { expect, test } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
 import { changeError, ipcCalls, mockDesktop } from "./fixtures";
+import { fixtureCalls, fixtureSnapshot } from "../src/test/fixtures";
+import { translator } from "../src/i18n";
 
 const nav = (page: Page, name: string) =>
-  page
-    .getByRole("navigation", { name: "Main navigation" })
-    .getByRole("button", { name, exact: true });
+  page.getByRole("navigation").getByRole("button", { name, exact: true });
 async function openDesktop(page: Page) {
   await page.goto("/");
   await expect(
@@ -632,4 +632,116 @@ test("narrow viewport keeps controls reachable without horizontal document overf
   await expect(
     page.getByRole("heading", { name: "Preferences" }),
   ).toBeVisible();
+});
+
+for (const language of ["en", "zh"] as const) {
+  test(`interrupted history and keyboard dialog controls are accessible in ${language}`, async ({
+    page,
+  }) => {
+    const snapshot = fixtureSnapshot({ stopped: true, tunnelFailure: true });
+    snapshot.settings.language = language;
+    const t = translator(language);
+    await mockDesktop(page, {
+      snapshot,
+      activity: [
+        ...fixtureCalls,
+        {
+          ...fixtureCalls[2],
+          id: "previous-call",
+          tool: "previous_process_tool",
+          outcome: "interrupted",
+        },
+      ],
+    });
+    await openDesktop(page);
+    const navigation = page.getByRole("navigation", {
+      name: t("Main navigation"),
+    });
+    await expect(
+      navigation.getByRole("button", { name: t("Dashboard") }),
+    ).toHaveAttribute("aria-current", "page");
+    const table = page.getByRole("table", { name: t("Recent tool calls") });
+    await expect(table.getByRole("columnheader")).toHaveCount(4);
+    await expect(
+      table
+        .getByRole("row")
+        .filter({ hasText: "previous_process_tool" })
+        .getByRole("cell", { name: t("Interrupted"), exact: true }),
+    ).toBeVisible();
+    await nav(page, t("Activity")).click();
+    await page.getByRole("textbox", { name: t("All outcomes") }).click();
+    await page
+      .getByRole("option", { name: t("In progress"), exact: true })
+      .click();
+    await expect(page.getByText("search_code", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("previous_process_tool", { exact: true }),
+    ).toHaveCount(0);
+    await page.getByRole("textbox", { name: t("All outcomes") }).click();
+    await page
+      .getByRole("option", { name: t("Interrupted"), exact: true })
+      .click();
+    await expect(
+      page.getByText("previous_process_tool", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("search_code", { exact: true })).toHaveCount(0);
+    await nav(page, t("Connections")).click();
+    const edit = page.getByRole("button", {
+      name: t("Edit workspace"),
+      exact: true,
+    });
+    await edit.click();
+    const dialog = page.getByRole("dialog", { name: t("Edit workspace") });
+    await expect(
+      dialog.getByRole("button", { name: t("Close"), exact: true }),
+    ).toBeVisible();
+    const reveal = dialog
+      .getByRole("button", { name: t("Toggle password visibility") })
+      .first();
+    await reveal.focus();
+    await page.keyboard.press("Space");
+    await expect(reveal).toHaveAttribute("aria-pressed", "true");
+    await expect(
+      dialog.getByLabel(t("Bearer token"), { exact: true }),
+    ).toHaveAttribute("type", "text");
+    await page.keyboard.press("Enter");
+    await expect(reveal).toHaveAttribute("aria-pressed", "false");
+    await expect(
+      dialog.getByLabel(t("Bearer token"), { exact: true }),
+    ).toHaveAttribute("type", "password");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(edit).toBeFocused();
+    expect(await ipcCalls(page, "save_workspace")).toHaveLength(0);
+  });
+}
+
+test("a crashed workspace with pending cleanup can retry Stop before configuration is unlocked", async ({
+  page,
+}) => {
+  const snapshot = fixtureSnapshot({ stopped: true });
+  Object.assign(snapshot.statuses[0], { state: "error", cleanupPending: true });
+  await mockDesktop(page, { snapshot });
+  await openDesktop(page);
+  await expect(
+    page.getByRole("button", { name: "Stop workspace", exact: true }),
+  ).toBeEnabled();
+  await nav(page, "Connections").click();
+  await expect(
+    page.getByRole("button", { name: "Edit workspace" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Remove workspace" }),
+  ).toBeDisabled();
+  await page
+    .getByRole("button", { name: "Stop workspace", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Start workspace", exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "Edit workspace" }),
+  ).toBeEnabled();
+  expect(await ipcCalls(page, "stop_workspace")).toHaveLength(1);
+  expect(await ipcCalls(page, "start_workspace")).toHaveLength(0);
 });

@@ -43,6 +43,8 @@ const zh: Record<string, string> = {
   "Local service is not running. Start it before retrying the tunnel.":
     "本地服务未运行。重试隧道前请先启动。",
   "Open navigation": "打开导航",
+  "Main navigation": "主导航",
+  "Toggle password visibility": "显示或隐藏密码",
   Dashboard: "概览",
   Connections: "连接",
   Activity: "工具调用",
@@ -122,6 +124,7 @@ const zh: Record<string, string> = {
   Success: "成功",
   Failed: "失败",
   "In progress": "进行中",
+  Interrupted: "已中断",
   "No workspace selected": "未选择工作区",
   "Select or create a workspace to continue.": "选择或创建工作区以继续。",
   "Workspace details": "工作区详情",

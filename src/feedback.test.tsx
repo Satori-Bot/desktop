@@ -56,9 +56,7 @@ async function mount() {
 async function openSettings(name = "Settings") {
   await act(async () => {
     fireEvent.click(
-      within(
-        screen.getByRole("navigation", { name: "Main navigation" }),
-      ).getByRole("button", { name }),
+      within(screen.getByRole("navigation")).getByRole("button", { name }),
     );
   });
   // jsdom has no layout engine. This models a retained document scroll offset;

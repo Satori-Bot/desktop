@@ -8,7 +8,6 @@ import {
   Group,
   Modal,
   Paper,
-  PasswordInput,
   SegmentedControl,
   Select,
   Stack,
@@ -44,7 +43,10 @@ import type {
   Status,
   Workspace,
 } from "../types";
-import { errorText, isActive } from "../types";
+import { activityOutcome, errorText, isActive } from "../types";
+import { useSavedDraft } from "../hooks/useSavedDraft";
+import { usePageActive } from "../hooks/usePageActive";
+import { SecretInput } from "./SecretInput";
 import type { Translate } from "../i18n";
 import type { RunAction } from "../App";
 import { CallList, Empty, EndpointCard, SectionHead } from "./Common";
@@ -70,13 +72,7 @@ export function ConnectionsPage({
   onCopy: (text: string) => Promise<void>;
   onSaved: (w: Workspace) => void;
 }) {
-  const pageActive = useRef(true);
-  useEffect(() => {
-    pageActive.current = true;
-    return () => {
-      pageActive.current = false;
-    };
-  }, []);
+  const pageActive = usePageActive();
   const [config, setConfig] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<AuthDetails | null>(null);
   const [tunnelName, setTunnelName] = useState(
@@ -331,7 +327,7 @@ export function ConnectionsPage({
                   "cloudflare-login",
                   api.cloudflareLogin,
                 );
-                if (output) setLoginOutput(output);
+                if (pageActive.current && output) setLoginOutput(output);
               }}
             >
               {t("Authorize Cloudflare")}
@@ -406,6 +402,7 @@ export function ConnectionsPage({
         opened={config !== null}
         onClose={() => setConfig(null)}
         title={t("Configure your client")}
+        closeButtonProps={{ "aria-label": t("Close") }}
         size="lg"
         centered
       >
@@ -433,6 +430,7 @@ export function ConnectionsPage({
         opened={credentials !== null}
         onClose={() => setCredentials(null)}
         title={t("Show credentials")}
+        closeButtonProps={{ "aria-label": t("Close") }}
         centered
       >
         <Stack>
@@ -442,14 +440,16 @@ export function ConnectionsPage({
             )}
           </Alert>
           {credentials?.bearerToken && (
-            <PasswordInput
+            <SecretInput
+              t={t}
               label={t("Bearer token")}
               value={credentials.bearerToken}
               readOnly
             />
           )}
           {credentials?.oauthPassword && (
-            <PasswordInput
+            <SecretInput
+              t={t}
               label={t("OAuth password")}
               value={credentials.oauthPassword}
               readOnly
@@ -492,14 +492,7 @@ export function ActivityPage({
   const filtered = calls.filter(
     (call) =>
       call.tool.toLowerCase().includes(search.toLowerCase()) &&
-      (outcome === "all" ||
-        (outcome === "pending" && !call.finishedAt) ||
-        (outcome === "success" &&
-          !!call.finishedAt &&
-          ["success", "ok", "completed"].includes(call.outcome)) ||
-        (outcome === "failed" &&
-          !!call.finishedAt &&
-          !["success", "ok", "completed"].includes(call.outcome))),
+      (outcome === "all" || outcome === activityOutcome(call)),
   );
   return (
     <Stack gap="lg">
@@ -546,6 +539,7 @@ export function ActivityPage({
             { value: "all", label: t("All outcomes") },
             { value: "success", label: t("Success") },
             { value: "failed", label: t("Failed") },
+            { value: "interrupted", label: t("Interrupted") },
             { value: "pending", label: t("In progress") },
           ]}
         />
@@ -790,6 +784,9 @@ export function DiagnosticsPage({
     </Stack>
   );
 }
+const sameSettings = (a: Settings, b: Settings) =>
+  a.language === b.language && a.closeToTray === b.closeToTray;
+
 export function SettingsPage({
   settings,
   available,
@@ -798,6 +795,7 @@ export function SettingsPage({
   run,
   busy,
   onQuit,
+  onSettingsSaved,
   workspace,
   status,
   onSaved,
@@ -810,30 +808,30 @@ export function SettingsPage({
   run: RunAction;
   busy: string;
   onQuit: () => void;
+  onSettingsSaved: (settings: Settings) => void;
   workspace?: Workspace;
   status?: Status;
   onSaved: (workspace: Workspace) => void;
   t: Translate;
 }) {
-  const [draft, setDraft] = useState(settings);
-  const dirty = useRef(false);
+  const pageActive = usePageActive();
+  const [draft, setDraft] = useSavedDraft(settings, sameSettings);
+  const dirty = !sameSettings(draft, settings);
   const [version, setVersion] = useState("");
   const [validation, setValidation] = useState("");
   const [output, setOutput] = useState("");
   const { colorScheme, setColorScheme } = useMantineColorScheme();
-  useEffect(() => {
-    if (!dirty.current) setDraft(settings);
-  }, [settings]);
   async function save() {
     const result = await run(
       "settings",
-      () => api.saveSettings(draft),
+      async () => {
+        const saved = await api.saveSettings(draft);
+        onSettingsSaved(saved);
+        return saved;
+      },
       t("Saved"),
     );
-    if (result) {
-      setDraft(result);
-      dirty.current = false;
-    }
+    if (pageActive.current && result) setDraft(result);
   }
   async function install() {
     if (!/^\d+\.\d+(?:\.\d+)?(?:[a-zA-Z0-9.+-]*)$/.test(version)) {
@@ -842,7 +840,7 @@ export function SettingsPage({
     }
     setValidation("");
     const result = await run("install", () => api.installCore(version));
-    if (result) setOutput(result);
+    if (pageActive.current && result) setOutput(result);
   }
   return (
     <Stack gap="xl">
@@ -863,7 +861,6 @@ export function SettingsPage({
             value={draft.language}
             onChange={(language) => {
               if (language) {
-                dirty.current = true;
                 setDraft({
                   ...draft,
                   language: language as Settings["language"],
@@ -906,7 +903,6 @@ export function SettingsPage({
             checked={draft.closeToTray}
             disabled={!!busy || !available}
             onChange={(event) => {
-              dirty.current = true;
               setDraft({ ...draft, closeToTray: event.currentTarget.checked });
             }}
           />
@@ -915,9 +911,7 @@ export function SettingsPage({
           <Button
             onClick={() => void save()}
             loading={busy === "settings"}
-            disabled={
-              !available || (!!busy && busy !== "settings") || !dirty.current
-            }
+            disabled={!available || (!!busy && busy !== "settings") || !dirty}
           >
             {t("Save changes")}
           </Button>
@@ -978,7 +972,7 @@ export function SettingsPage({
             variant="default"
             onClick={async () => {
               const result = await run("rollback", api.rollbackCore);
-              if (result) setOutput(result);
+              if (pageActive.current && result) setOutput(result);
             }}
             loading={busy === "rollback"}
             disabled={!available || (!!busy && busy !== "rollback")}
@@ -1041,6 +1035,10 @@ export function SettingsPage({
   );
 }
 
+type RuntimeDraft = { executable: string; argumentsText: string };
+const sameRuntime = (a: RuntimeDraft, b: RuntimeDraft) =>
+  a.executable === b.executable && a.argumentsText === b.argumentsText;
+
 function RuntimeOverride({
   workspace,
   status,
@@ -1056,17 +1054,15 @@ function RuntimeOverride({
   busy: string;
   t: Translate;
 }) {
-  const pageActive = useRef(true);
-  useEffect(() => {
-    pageActive.current = true;
-    return () => {
-      pageActive.current = false;
-    };
-  }, []);
-  const [executable, setExecutable] = useState(workspace.coreCommand[0] ?? "");
-  const [argumentsText, setArgumentsText] = useState(
-    workspace.coreCommand.slice(1).join("\n"),
+  const pageActive = usePageActive();
+  const [draft, setDraft] = useSavedDraft(
+    {
+      executable: workspace.coreCommand[0] ?? "",
+      argumentsText: workspace.coreCommand.slice(1).join("\n"),
+    },
+    sameRuntime,
   );
+  const { executable, argumentsText } = draft;
   const active = isActive(status);
   const dirty =
     executable.trim() !== (workspace.coreCommand[0] ?? "") ||
@@ -1084,8 +1080,10 @@ function RuntimeOverride({
       t("Saved"),
     );
     if (pageActive.current && result) {
-      setExecutable(result.coreCommand[0] ?? "");
-      setArgumentsText(result.coreCommand.slice(1).join("\n"));
+      setDraft({
+        executable: result.coreCommand[0] ?? "",
+        argumentsText: result.coreCommand.slice(1).join("\n"),
+      });
       onSaved(result);
     }
   }
@@ -1109,13 +1107,17 @@ function RuntimeOverride({
           label={t("Executable path")}
           placeholder="/path/to/venv/bin/coding-tools-mcp"
           value={executable}
-          onChange={(event) => setExecutable(event.currentTarget.value)}
+          onChange={(event) =>
+            setDraft({ ...draft, executable: event.currentTarget.value })
+          }
           disabled={active || !!busy}
         />
         <Textarea
           label={t("Arguments (one per line)")}
           value={argumentsText}
-          onChange={(event) => setArgumentsText(event.currentTarget.value)}
+          onChange={(event) =>
+            setDraft({ ...draft, argumentsText: event.currentTarget.value })
+          }
           disabled={active || !!busy || !executable.trim()}
           minRows={2}
         />

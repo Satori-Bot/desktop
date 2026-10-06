@@ -8,7 +8,6 @@ import {
   Group,
   Modal,
   NumberInput,
-  PasswordInput,
   SegmentedControl,
   Select,
   Stack,
@@ -30,6 +29,8 @@ import { api, backendAvailable } from "../api";
 import { blankWorkspace, errorText } from "../types";
 import type { Access, Secrets, Workspace } from "../types";
 import type { Translate } from "../i18n";
+import { usePageActive } from "../hooks/usePageActive";
+import { SecretInput } from "./SecretInput";
 function validate(workspace: Workspace, t: Translate) {
   if (!workspace.name.trim() || !workspace.path.trim())
     return t("Name and folder are required.");
@@ -58,6 +59,7 @@ export function WorkspaceModal({
   t: Translate;
   locked?: boolean;
 }) {
+  const pageActive = usePageActive();
   const [draft, setDraft] = useState<Workspace>(() =>
     workspace ? { ...workspace } : blankWorkspace(),
   );
@@ -70,27 +72,27 @@ export function WorkspaceModal({
   const update = (patch: Partial<Workspace>) =>
     setDraft((d) => ({ ...d, ...patch }));
   async function browse() {
-    if (lock.current || locked) return;
+    if (!pageActive.current || lock.current || locked) return;
     lock.current = true;
     setBusy(true);
     setError("");
     try {
       const path = await api.pickDirectory();
-      if (path)
+      if (pageActive.current && path)
         setDraft((d) => ({
           ...d,
           path,
           name: d.name || path.split(/[\\/]/).filter(Boolean).at(-1) || "",
         }));
     } catch (e) {
-      setError(errorText(e));
+      if (pageActive.current) setError(errorText(e));
     } finally {
       lock.current = false;
-      setBusy(false);
+      if (pageActive.current) setBusy(false);
     }
   }
   async function save(start: boolean) {
-    if (lock.current || locked) return;
+    if (!pageActive.current || lock.current || locked) return;
     const invalid = validate(draft, t);
     if (invalid) {
       setError(invalid);
@@ -104,12 +106,14 @@ export function WorkspaceModal({
         { ...draft, name: draft.name.trim(), path: draft.path.trim() },
         secrets,
       );
+      if (!pageActive.current) return;
       setDraft(saved);
       onSaved(saved);
       if (start) {
         try {
           await api.start(saved.id);
         } catch (e) {
+          if (!pageActive.current) return;
           setError(
             `${t("Created successfully. Start failed; your workspace is saved and can be retried.")} ${errorText(e)}`,
           );
@@ -117,11 +121,11 @@ export function WorkspaceModal({
           return;
         }
       }
-      onClose();
+      if (pageActive.current) onClose();
     } catch (e) {
-      setError(errorText(e));
+      if (pageActive.current) setError(errorText(e));
     } finally {
-      setBusy(false);
+      if (pageActive.current) setBusy(false);
       lock.current = false;
     }
   }
@@ -245,7 +249,8 @@ export function WorkspaceModal({
         </>
       )}
       {draft.auth === "bearer" && (
-        <PasswordInput
+        <SecretInput
+          t={t}
           label={t("Bearer token")}
           description={t(
             edit
@@ -261,7 +266,8 @@ export function WorkspaceModal({
         />
       )}
       {draft.auth === "oauth" && (
-        <PasswordInput
+        <SecretInput
+          t={t}
           label={t("OAuth password")}
           description={t(
             edit
@@ -278,7 +284,8 @@ export function WorkspaceModal({
       )}
       {draft.access === "named" && (
         <>
-          <PasswordInput
+          <SecretInput
+            t={t}
             label={t("Cloudflare tunnel token")}
             description={t("Leave empty to keep the saved secret")}
             value={secrets.cloudflareToken ?? ""}
@@ -352,6 +359,7 @@ export function WorkspaceModal({
       title={t(edit ? "Edit workspace" : "New workspace")}
       size="lg"
       centered
+      closeButtonProps={{ "aria-label": t("Close") }}
       closeOnClickOutside={!busy}
       closeOnEscape={!busy}
       withCloseButton={!busy}
@@ -529,6 +537,7 @@ export function ConfirmModal({
     <Modal
       opened
       title={title}
+      closeButtonProps={{ "aria-label": t("Close") }}
       onClose={onClose}
       closeOnClickOutside={!busy}
       closeOnEscape={!busy}

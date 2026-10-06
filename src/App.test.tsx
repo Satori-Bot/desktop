@@ -40,9 +40,7 @@ async function dashboard() {
 }
 async function navigate(name: string) {
   await userEvent.click(
-    within(
-      screen.getByRole("navigation", { name: "Main navigation" }),
-    ).getByRole("button", { name }),
+    within(screen.getByRole("navigation")).getByRole("button", { name }),
   );
 }
 async function onboarding() {

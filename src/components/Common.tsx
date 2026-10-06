@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import type { Activity, Status } from "../types";
+import { activityOutcome } from "../types";
 import type { Translate } from "../i18n";
 export function StateBadge({ state, t }: { state?: string; t: Translate }) {
   const known: Record<string, [string, string]> = {
@@ -141,19 +142,22 @@ export function CallList({
       aria-label={t("Recent tool calls")}
     >
       <div className="call-row call-header" role="row">
-        <span>{t("Tool")}</span>
-        <span>{t("Outcome")}</span>
-        <span>{t("Duration")}</span>
-        <span>{t("Started")}</span>
+        <span role="columnheader">{t("Tool")}</span>
+        <span role="columnheader">{t("Outcome")}</span>
+        <span role="columnheader">{t("Duration")}</span>
+        <span role="columnheader">{t("Started")}</span>
       </div>
       {calls.slice(0, limit).map((call) => {
-        const success = ["success", "ok", "completed"].includes(call.outcome);
-        const pending = !call.finishedAt;
+        const outcome = activityOutcome(call);
+        const success = outcome === "success";
+        const pending = outcome === "pending";
+        const interrupted = outcome === "interrupted";
         return (
           <div className="call-row" role="row" key={call.id}>
-            <div className="tool-name">
+            <div className="tool-name" role="cell">
               <span
-                className={`call-icon ${pending ? "pending" : success ? "success" : "failure"}`}
+                aria-hidden="true"
+                className={`call-icon ${pending || interrupted ? "pending" : success ? "success" : "failure"}`}
               >
                 {pending ? (
                   <Clock3 size={15} />
@@ -175,20 +179,31 @@ export function CallList({
               </div>
             </div>
             <Badge
-              color={pending ? "yellow" : success ? "teal" : "red"}
+              role="cell"
+              color={
+                pending || interrupted ? "yellow" : success ? "teal" : "red"
+              }
               variant="light"
               size="sm"
             >
-              {t(pending ? "In progress" : success ? "Success" : "Failed")}
+              {t(
+                interrupted
+                  ? "Interrupted"
+                  : pending
+                    ? "In progress"
+                    : success
+                      ? "Success"
+                      : "Failed",
+              )}
             </Badge>
-            <span className="mono muted">
+            <span className="mono muted" role="cell">
               {call.durationMs === null
                 ? "—"
                 : call.durationMs < 1000
                   ? `${call.durationMs} ms`
                   : `${(call.durationMs / 1000).toFixed(2)} s`}
             </span>
-            <span className="muted call-time">
+            <span className="muted call-time" role="cell">
               {formatTime(call.startedAt, language)}
             </span>
           </div>

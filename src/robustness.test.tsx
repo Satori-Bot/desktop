@@ -9,8 +9,10 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { WorkspaceModal } from "./components/WorkspaceModal";
+import { translator } from "./i18n";
 import { fixtureCalls, fixtureSnapshot } from "./test/fixtures";
-import type { Activity, Logs, Snapshot, Workspace } from "./types";
+import type { Activity, Logs, Settings, Snapshot, Workspace } from "./types";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -42,6 +44,10 @@ async function defaultInvoke(command: string, args?: Record<string, unknown>) {
       workspace.id === saved.id ? saved : workspace,
     );
     return saved;
+  }
+  if (command === "save_settings") {
+    snapshot.settings = structuredClone(args?.settings as Settings);
+    return snapshot.settings;
   }
   if (command === "start_workspace") {
     const index = snapshot.statuses.findIndex(
@@ -78,9 +84,7 @@ async function mount() {
 async function navigate(name: string) {
   await act(async () => {
     fireEvent.click(
-      within(
-        screen.getByRole("navigation", { name: "Main navigation" }),
-      ).getByRole("button", { name }),
+      within(screen.getByRole("navigation")).getByRole("button", { name }),
     );
   });
 }
@@ -598,4 +602,318 @@ describe("desktop interrupted and delayed IPC flows", () => {
       ).not.toBeInTheDocument();
     },
   );
+});
+
+describe("saved drafts and accessible history", () => {
+  it.each(["en", "zh"] as const)(
+    "distinguishes interrupted history from live calls and exposes table cells in %s",
+    async (language) => {
+      snapshot.settings.language = language;
+      invoke.mockImplementation((command, args) =>
+        command === "activity"
+          ? Promise.resolve([
+              ...fixtureCalls,
+              {
+                ...fixtureCalls[2],
+                id: "interrupted-call",
+                tool: "previous_process_tool",
+                outcome: "interrupted",
+              },
+            ])
+          : defaultInvoke(command, args),
+      );
+      await mount();
+      const table = screen.getByRole("table");
+      const interruptedRow = within(table)
+        .getByText("previous_process_tool")
+        .closest('[role="row"]')!;
+      expect(interruptedRow).toHaveTextContent(
+        language === "zh" ? "已中断" : "Interrupted",
+      );
+      expect(within(table).getAllByRole("columnheader")).toHaveLength(4);
+      expect(
+        within(interruptedRow as HTMLElement).getAllByRole("cell"),
+      ).toHaveLength(4);
+      await navigate(language === "zh" ? "工具调用" : "Activity");
+      const outcomes = screen.getByRole("textbox", {
+        name: language === "zh" ? "所有结果" : "All outcomes",
+      });
+      fireEvent.click(outcomes);
+      await act(async () =>
+        fireEvent.click(
+          screen.getByRole("option", {
+            name: language === "zh" ? "进行中" : "In progress",
+          }),
+        ),
+      );
+      expect(screen.getByText("search_code")).toBeInTheDocument();
+      expect(
+        screen.queryByText("previous_process_tool"),
+      ).not.toBeInTheDocument();
+      fireEvent.click(outcomes);
+      await act(async () =>
+        fireEvent.click(
+          screen.getByRole("option", {
+            name: language === "zh" ? "已中断" : "Interrupted",
+          }),
+        ),
+      );
+      expect(screen.getByText("previous_process_tool")).toBeInTheDocument();
+      expect(screen.queryByText("search_code")).not.toBeInTheDocument();
+    },
+  );
+
+  it("updates a pristine runtime draft after polling changes the saved executable", async () => {
+    snapshot = fixtureSnapshot({ stopped: true });
+    await mount();
+    await navigate("Settings");
+    snapshot.workspaces[0].coreCommand = [
+      "/externally/saved/core",
+      "--project",
+      "/new/project",
+    ];
+    await tick(4000);
+    expect(screen.getByLabelText("Executable path")).toHaveValue(
+      "/externally/saved/core",
+    );
+    expect(screen.getByLabelText("Arguments (one per line)")).toHaveValue(
+      "--project\n/new/project",
+    );
+    expect(
+      screen.getByRole("button", { name: "Save runtime selection" }),
+    ).toBeDisabled();
+    expect(count("save_workspace")).toBe(0);
+  });
+
+  it("preserves a dirty runtime draft across polling and saves against the latest workspace", async () => {
+    snapshot = fixtureSnapshot({ stopped: true });
+    snapshot.workspaces[0].coreCommand = ["/saved/core", "--original"];
+    await mount();
+    await navigate("Settings");
+    fireEvent.change(screen.getByLabelText("Executable path"), {
+      target: { value: "/draft/core" },
+    });
+    snapshot.workspaces[0].coreCommand = ["/external/core", "--external"];
+    snapshot.workspaces[0].name = "Renamed workspace";
+    await tick(4000);
+    expect(screen.getByLabelText("Executable path")).toHaveValue("/draft/core");
+    expect(screen.getByLabelText("Arguments (one per line)")).toHaveValue(
+      "--original",
+    );
+    await act(async () =>
+      fireEvent.click(
+        screen.getByRole("button", { name: "Save runtime selection" }),
+      ),
+    );
+    expect(snapshot.workspaces[0].coreCommand).toEqual([
+      "/draft/core",
+      "--original",
+    ]);
+    expect(snapshot.workspaces[0].name).toBe("Renamed workspace");
+  });
+
+  it("clears preference dirty state when a change is undone, then accepts refreshed settings", async () => {
+    await mount();
+    await navigate("Settings");
+    const toggle = screen.getByRole("switch", { name: "Close to tray" });
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    snapshot.settings.closeToTray = false;
+    await tick(4000);
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    expect(count("save_settings")).toBe(0);
+  });
+
+  it("applies a confirmed settings save even when the follow-up snapshot fails", async () => {
+    await mount();
+    await navigate("Settings");
+    fireEvent.click(screen.getByRole("textbox", { name: "Language" }));
+    fireEvent.click(screen.getByRole("option", { name: "简体中文" }));
+    invoke.mockImplementation((command, args) =>
+      command === "snapshot"
+        ? Promise.reject(new Error("Temporary refresh failure"))
+        : defaultInvoke(command, args),
+    );
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Save changes" })),
+    );
+    expect(
+      screen.getByRole("heading", { name: "偏好设置" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存更改" })).toBeDisabled();
+    expect(
+      screen.getByRole("alert", { name: "无法刷新状态" }),
+    ).toHaveTextContent("Temporary refresh failure");
+    expect(document.documentElement.lang).toBe("zh-CN");
+    expect(count("save_settings")).toBe(1);
+    await navigate("概览");
+    await navigate("设置");
+    expect(screen.getByRole("textbox", { name: "语言" })).toHaveValue(
+      "简体中文",
+    );
+  });
+
+  it("preserves a dirty preference draft when polling returns updated settings", async () => {
+    await mount();
+    await navigate("Settings");
+    fireEvent.click(screen.getByRole("textbox", { name: "Language" }));
+    fireEvent.click(screen.getByRole("option", { name: "简体中文" }));
+    snapshot.settings.closeToTray = false;
+    await tick(4000);
+    expect(screen.getByRole("textbox", { name: "Language" })).toHaveValue(
+      "简体中文",
+    );
+    expect(screen.getByRole("switch", { name: "Close to tray" })).toBeChecked();
+    expect(count("save_settings")).toBe(0);
+  });
+
+  it.each(["en", "zh"] as const)(
+    "names navigation, dialog close and keyboard secret controls in %s",
+    async (language) => {
+      snapshot = fixtureSnapshot({ stopped: true, tunnelFailure: true });
+      snapshot.settings.language = language;
+      const t = translator(language);
+      await mount();
+      const nav = screen.getByRole("navigation", {
+        name: t("Main navigation"),
+      });
+      expect(
+        within(nav).getByRole("button", { name: t("Dashboard") }),
+      ).toHaveAttribute("aria-current", "page");
+      await navigate(t("Connections"));
+      expect(
+        within(nav).getByRole("button", { name: t("Connections") }),
+      ).toHaveAttribute("aria-current", "page");
+      expect(
+        within(nav).getByRole("button", { name: t("Dashboard") }),
+      ).not.toHaveAttribute("aria-current");
+      fireEvent.click(
+        screen.getByRole("button", { name: t("Edit workspace") }),
+      );
+      const modal = screen.getByRole("dialog", { name: t("Edit workspace") });
+      const reveals = within(modal).getAllByRole("button", {
+        name: t("Toggle password visibility"),
+      });
+      expect(reveals).toHaveLength(2);
+      for (const reveal of reveals) {
+        expect(reveal).toHaveAttribute("tabindex", "0");
+        expect(reveal).toHaveAttribute("aria-pressed", "false");
+        fireEvent.keyDown(reveal, { key: " " });
+        expect(reveal).toHaveAttribute("aria-pressed", "true");
+        fireEvent.click(reveal, { detail: 0 });
+        expect(reveal).toHaveAttribute("aria-pressed", "false");
+      }
+      fireEvent.click(within(modal).getByRole("button", { name: t("Close") }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(count("save_workspace")).toBe(0);
+    },
+  );
+
+  it("does not start services or call dismissed editor callbacks after a late create response", async () => {
+    const save = deferred<Workspace>();
+    const onSaved = vi.fn();
+    const onClose = vi.fn();
+    invoke.mockImplementation((command, args) =>
+      command === "save_workspace"
+        ? save.promise
+        : defaultInvoke(command, args),
+    );
+    const view = render(
+      <MantineProvider env="test">
+        <WorkspaceModal
+          workspace={null}
+          onSaved={onSaved}
+          onClose={onClose}
+          t={translator("en")}
+        />
+      </MantineProvider>,
+    );
+    fireEvent.change(
+      screen.getByLabelText("Workspace name", { exact: false }),
+      { target: { value: "New project" } },
+    );
+    fireEvent.change(screen.getByLabelText("Folder path", { exact: false }), {
+      target: { value: "/fixture/new" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create and start" }));
+    expect(count("save_workspace")).toBe(1);
+    view.unmount();
+    await act(async () =>
+      save.resolve({ ...snapshot.workspaces[0], id: "created-workspace" }),
+    );
+    expect(count("start_workspace")).toBe(0);
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps Stop and configuration locks available when process cleanup is still pending without a live PID", async () => {
+    snapshot = fixtureSnapshot({ stopped: true });
+    snapshot.statuses[0].state = "error";
+    snapshot.statuses[0].cleanupPending = true;
+    await mount();
+    expect(
+      screen.getByRole("button", { name: "Stop workspace" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Start workspace" }),
+    ).not.toBeInTheDocument();
+    await navigate("Connections");
+    expect(
+      screen.getByRole("button", { name: "Edit workspace" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Remove workspace" }),
+    ).toBeDisabled();
+    await navigate("Settings");
+    expect(screen.getByLabelText("Executable path")).toBeDisabled();
+    await navigate("Dashboard");
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Stop workspace" })),
+    );
+    expect(invoke).toHaveBeenCalledWith("stop_workspace", {
+      id: "test-workspace",
+    });
+    expect(count("start_workspace")).toBe(0);
+  });
+
+  it("updates a reopened runtime editor when an earlier save finishes without changing the current page", async () => {
+    snapshot = fixtureSnapshot({ stopped: true });
+    const save = deferred<Workspace>();
+    invoke.mockImplementation((command, args) =>
+      command === "save_workspace"
+        ? save.promise
+        : defaultInvoke(command, args),
+    );
+    await mount();
+    await navigate("Settings");
+    fireEvent.change(screen.getByLabelText("Executable path"), {
+      target: { value: "/slow/saved/core" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Save runtime selection" }),
+    );
+    await navigate("Dashboard");
+    await navigate("Settings");
+    const saved = {
+      ...snapshot.workspaces[0],
+      coreCommand: ["/slow/saved/core"],
+    };
+    snapshot.workspaces[0] = saved;
+    await act(async () => save.resolve(saved));
+    expect(
+      screen.getByRole("heading", { name: "Preferences" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Executable path")).toHaveValue(
+      "/slow/saved/core",
+    );
+    expect(
+      screen.getByRole("button", { name: "Save runtime selection" }),
+    ).toBeDisabled();
+    expect(count("save_workspace")).toBe(1);
+  });
 });

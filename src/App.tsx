@@ -40,7 +40,7 @@ import {
   X,
 } from "lucide-react";
 import { api, backendAvailable } from "./api";
-import type { Activity, Snapshot, Workspace } from "./types";
+import type { Activity, Settings, Snapshot, Workspace } from "./types";
 import { errorText, isActive } from "./types";
 import { translator } from "./i18n";
 import {
@@ -238,6 +238,11 @@ export default function App() {
     setSelected(next.id);
     if (navigate) setPage("Dashboard");
   }
+  function settingsSaved(settings: Settings) {
+    if (!mounted.current) return;
+    ++request.current;
+    setSnapshot((current) => (current ? { ...current, settings } : current));
+  }
   const closeEditor = () => {
     setWorkspaceModal(undefined);
     void refresh(true);
@@ -333,11 +338,12 @@ export default function App() {
         <div className="nav-eyebrow navigation-caption">
           {t("CONTROL ROOM")}
         </div>
-        <nav aria-label="Main navigation">
+        <nav aria-label={t("Main navigation")}>
           {navigation.map((item) => (
             <button
               key={item.name}
               className={`nav-item ${page === item.name ? "active" : ""}`}
+              aria-current={page === item.name ? "page" : undefined}
               onClick={() => navigate(item.name)}
             >
               <item.icon size={18} />
@@ -479,6 +485,7 @@ export default function App() {
               run={run}
               busy={busy}
               onQuit={() => setConfirm({ kind: "quit" })}
+              onSettingsSaved={settingsSaved}
               workspace={workspace}
               status={status}
               onSaved={(w) => saved(w, false)}
