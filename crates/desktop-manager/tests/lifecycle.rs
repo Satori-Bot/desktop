@@ -28,6 +28,17 @@ fn workspace(path: &std::path::Path) -> Workspace {
 }
 fn manager() -> (tempfile::TempDir, Arc<Manager>) {
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    let m = Manager::open_supervised(
+        dir.path().join("home"),
+        std::env::var_os("DESKTOP_SUPERVISOR_BIN")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(env!("CARGO_BIN_EXE_desktop-process-supervisor"))
+            }),
+    )
+    .unwrap();
+    #[cfg(not(unix))]
     let m = Manager::open(dir.path().join("home")).unwrap();
     (dir, m)
 }
@@ -229,8 +240,101 @@ fn official_core_mcp_acceptance() {
             .diagnose(&w.id)
             .unwrap()
             .iter()
-            .any(|d| d.name == "Tool activity" && d.level == "warning"));
+            .any(|d| d.name == "Tool activity"
+                && d.level == "warning"
+                && d.message
+                    .contains("d7c2dda48bcedbd066c7dbc24a1b63205384d269")));
+    }
+    // A real restart must release the prior journal/process, preserve history,
+    // and expose only the capabilities of the newly launched core.
+    let restarted = m.restart(&w.id).unwrap();
+    assert_eq!(restarted.local_state, "ready");
+    assert_eq!(
+        restarted.activity_state,
+        if expect_activity {
+            "available"
+        } else {
+            "unavailable"
+        }
+    );
+    let restored = m.activity(&w.id).unwrap();
+    assert_eq!(restored.len(), activity.len());
+    let init = rpc(
+        5,
+        "initialize",
+        json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"desktop-restart-acceptance","version":"1"}}),
+    );
+    assert_eq!(init["result"]["serverInfo"]["name"], "coding-tools-mcp");
+    let after_restart = rpc(
+        6,
+        "tools/call",
+        json!({"name":"read_file","arguments":{"path":"hello.txt"}}),
+    );
+    assert_ne!(after_restart["result"]["isError"], true);
+    assert!(after_restart.to_string().contains("desktop acceptance"));
+    let combined = m.activity(&w.id).unwrap();
+    if expect_activity {
+        assert_eq!(combined.len(), 3);
+        assert_eq!(
+            combined
+                .iter()
+                .map(|row| &row.runtime_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            2
+        );
+    } else {
+        assert!(combined.is_empty());
     }
     m.stop_all().unwrap();
     assert!(TcpListener::bind(("127.0.0.1", w.port)).is_ok());
+}
+
+#[test]
+fn deleted_workspace_cannot_be_resurrected_by_a_stale_save() {
+    let (dir, manager) = manager();
+    let workspace = manager.save_workspace(workspace(dir.path()), None).unwrap();
+    manager.delete_workspace(&workspace.id).unwrap();
+    let backup = std::fs::read(manager.storage.home.join("desktop-before-delete.json")).unwrap();
+    assert!(manager
+        .save_workspace(workspace.clone(), None)
+        .unwrap_err()
+        .to_string()
+        .contains("removed"));
+    assert!(manager.start(&workspace.id).is_err());
+    assert!(manager.delete_workspace(&workspace.id).is_err());
+    assert!(manager.snapshot().workspaces.is_empty());
+    assert_eq!(
+        backup,
+        std::fs::read(manager.storage.home.join("desktop-before-delete.json")).unwrap()
+    );
+}
+
+#[test]
+fn successful_shutdown_closes_admission_but_stop_all_does_not() {
+    let (dir, manager) = manager();
+    let workspace = manager.save_workspace(workspace(dir.path()), None).unwrap();
+    manager.start(&workspace.id).unwrap();
+    manager.stop_all().unwrap();
+    manager.start(&workspace.id).unwrap();
+    manager.shutdown().unwrap();
+    assert!(manager
+        .start(&workspace.id)
+        .unwrap_err()
+        .to_string()
+        .contains("shutting down"));
+    assert!(manager.save_workspace(workspace.clone(), None).is_err());
+    assert!(manager.delete_workspace(&workspace.id).is_err());
+    assert!(manager
+        .install_core("0.5.0")
+        .unwrap_err()
+        .to_string()
+        .contains("shutting down"));
+    assert!(manager
+        .cloudflare_login()
+        .unwrap_err()
+        .to_string()
+        .contains("shutting down"));
+    assert_eq!(manager.snapshot().statuses[0].state, "stopped");
+    assert!(TcpListener::bind(("127.0.0.1", workspace.port)).is_ok());
 }

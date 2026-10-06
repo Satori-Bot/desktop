@@ -70,6 +70,13 @@ export function ConnectionsPage({
   onCopy: (text: string) => Promise<void>;
   onSaved: (w: Workspace) => void;
 }) {
+  const pageActive = useRef(true);
+  useEffect(() => {
+    pageActive.current = true;
+    return () => {
+      pageActive.current = false;
+    };
+  }, []);
   const [config, setConfig] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<AuthDetails | null>(null);
   const [tunnelName, setTunnelName] = useState(
@@ -91,7 +98,7 @@ export function ConnectionsPage({
     const result = await run(copyOnly ? "copy-config" : "config", () =>
       api.connectionConfig(workspace.id, isPublic),
     );
-    if (result !== undefined) {
+    if (pageActive.current && result !== undefined) {
       if (copyOnly) await onCopy(result);
       else setConfig(result);
     }
@@ -100,7 +107,7 @@ export function ConnectionsPage({
     const result = await run("credentials", () =>
       api.authDetails(workspace.id),
     );
-    if (result) setCredentials(result);
+    if (pageActive.current && result) setCredentials(result);
   }
   function requestTunnel() {
     if (
@@ -119,7 +126,7 @@ export function ConnectionsPage({
       () => api.setupNamedTunnel(workspace.id, tunnelName, hostname),
       t("Operation completed"),
     );
-    if (result) {
+    if (pageActive.current && result) {
       setConfirm(false);
       onSaved(result);
     }
@@ -276,6 +283,13 @@ export function ConnectionsPage({
           </Text>
         )}
       </Paper>
+      {workspace.auth === "oauth" && (
+        <Alert color="blue" icon={<Globe2 size={17} />}>
+          {t(
+            "After restarting or upgrading the core, reconnect your MCP client. If authorization fails, remove this server's saved authorization in the client and sign in again using the password from Show credentials.",
+          )}
+        </Alert>
+      )}
       <Paper withBorder p="xl">
         <Group gap="md" mb="md">
           <div className="panel-icon cloud">
@@ -592,11 +606,22 @@ export function DiagnosticsPage({
         reset ? 0 : cursor.current,
       );
       if (sequence !== generation.current) return;
+      const restarted = result.cursor === 0 && cursor.current !== 0;
       setLogs((current) =>
-        `${reset ? "" : current}${result.text}`.slice(-100000),
+        `${reset || result.truncated || restarted ? "" : current}${result.text}`.slice(
+          -100000,
+        ),
       );
       cursor.current = result.cursor;
-      setTruncated(result.truncated);
+      const clipped =
+        (reset || result.truncated || restarted ? 0 : logs.length) +
+          result.text.length >
+        100000;
+      setTruncated((previous) =>
+        reset
+          ? result.truncated || clipped
+          : previous || result.truncated || restarted || clipped,
+      );
       setLogError("");
     } catch (e) {
       if (sequence === generation.current) setLogError(errorText(e));
@@ -609,6 +634,8 @@ export function DiagnosticsPage({
   }
   useEffect(() => {
     setLogs("");
+    setLogError("");
+    setTruncated(false);
     cursor.current = 0;
     void readLogs(true);
     return () => {
@@ -753,7 +780,9 @@ export function DiagnosticsPage({
         )}
         {truncated && (
           <Text px="lg" pt="sm" c="dimmed" size="xs">
-            {t("Showing the most recent log output.")}
+            {t(
+              "Log output was truncated or restarted. Showing the latest available segment.",
+            )}
           </Text>
         )}
         <pre className="log-output">{logs || t("No logs available")}</pre>
@@ -1027,6 +1056,13 @@ function RuntimeOverride({
   busy: string;
   t: Translate;
 }) {
+  const pageActive = useRef(true);
+  useEffect(() => {
+    pageActive.current = true;
+    return () => {
+      pageActive.current = false;
+    };
+  }, []);
   const [executable, setExecutable] = useState(workspace.coreCommand[0] ?? "");
   const [argumentsText, setArgumentsText] = useState(
     workspace.coreCommand.slice(1).join("\n"),
@@ -1047,7 +1083,11 @@ function RuntimeOverride({
       () => api.saveWorkspace({ ...workspace, coreCommand: command }),
       t("Saved"),
     );
-    if (result) onSaved(result);
+    if (pageActive.current && result) {
+      setExecutable(result.coreCommand[0] ?? "");
+      setArgumentsText(result.coreCommand.slice(1).join("\n"));
+      onSaved(result);
+    }
   }
   return (
     <Paper withBorder p="xl">

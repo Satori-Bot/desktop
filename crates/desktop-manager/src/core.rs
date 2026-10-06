@@ -13,23 +13,52 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
 pub fn find_program(name: &str) -> Option<PathBuf> {
     let p = Path::new(name);
-    if p.is_absolute() && p.is_file() {
-        return Some(p.to_path_buf());
+    if p.is_absolute() {
+        return is_executable_file(p).then(|| p.to_path_buf());
     }
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
             .flat_map(|d| {
                 #[cfg(windows)]
-                let suffixes = vec![".exe", ".cmd", ""];
+                let suffixes = vec![".exe", ".cmd", ".bat", ".com", ""];
                 #[cfg(not(windows))]
                 let suffixes = vec![""];
                 suffixes
                     .into_iter()
                     .map(move |s| d.join(format!("{name}{s}")))
             })
-            .find(|p| p.is_file())
+            .find(|p| is_executable_file(p))
+            // Preserve symlink spellings (venv launchers can depend on them),
+            // but never let a relative PATH entry resolve again in a workspace.
+            .and_then(|p| {
+                if p.is_absolute() {
+                    Some(p)
+                } else {
+                    std::env::current_dir().ok().map(|cwd| cwd.join(p))
+                }
+            })
     })
 }
 pub fn resolve(w: &Workspace, config: &Config) -> Result<Vec<String>> {
@@ -37,9 +66,10 @@ pub fn resolve(w: &Workspace, config: &Config) -> Result<Vec<String>> {
         return Ok(w.core_command.clone());
     }
     if let Some(path) = &config.managed_core {
-        if Path::new(path).is_file() {
-            return Ok(vec![path.clone()]);
+        if !Path::new(path).is_absolute() || !is_executable_file(Path::new(path)) {
+            bail!("The selected managed core is missing or not executable. Reinstall it or roll back before starting; no other installation was selected.");
         }
+        return Ok(vec![path.clone()]);
     }
     if let Some(path) = find_program("coding-tools-mcp") {
         return Ok(vec![path.to_string_lossy().into()]);
@@ -47,8 +77,17 @@ pub fn resolve(w: &Workspace, config: &Config) -> Result<Vec<String>> {
     bail!("Python core is not installed. Open Settings and install the pinned core, or select an existing coding-tools-mcp executable.")
 }
 pub fn command(w: &Workspace, secrets: &Secrets, config: &Config, state: &Path) -> Result<Command> {
+    command_supervised(w, secrets, config, state, None)
+}
+pub fn command_supervised(
+    w: &Workspace,
+    secrets: &Secrets,
+    config: &Config,
+    state: &Path,
+    supervisor: Option<&Path>,
+) -> Result<Command> {
     let args = resolve(w, config)?;
-    let mut c = Command::new(&args[0]);
+    let mut c = crate::process::command(&args[0], supervisor);
     c.args(&args[1..]);
     c.args([
         "--workspace",
@@ -149,7 +188,18 @@ pub fn probe(w: &Workspace, secrets: &Secrets, public: bool) -> Result<String> {
     }
     Ok(format!("Core {version}: MCP initialize succeeded"))
 }
+fn reported_version(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        (fields.next() == Some("coding-tools-mcp"))
+            .then(|| fields.next())
+            .flatten()
+    })
+}
 pub fn version_output(args: &[String], dir: &Path) -> Result<String> {
+    if args.is_empty() || args[0].is_empty() {
+        bail!("Core executable is not configured");
+    }
     let tmp = tempfile::tempdir()?;
     let log = tmp.path().join("probe.log");
     let mut command = Command::new(&args[0]);
@@ -177,7 +227,7 @@ pub fn version_output(args: &[String], dir: &Path) -> Result<String> {
         .unwrap_or_default()
         .trim()
         .to_string();
-    if !text.contains("coding-tools-mcp") || text.len() > 512 {
+    if reported_version(&text).is_none() || text.len() > 512 {
         bail!("Executable did not identify itself as coding-tools-mcp");
     }
     Ok(text)
@@ -236,8 +286,11 @@ pub fn install(storage: &Storage, version: &str) -> Result<String> {
         }
     }
     let path = executable.to_string_lossy().into_owned();
-    version_output(std::slice::from_ref(&path), &storage.home)
+    let output = version_output(std::slice::from_ref(&path), &storage.home)
         .context("New core failed verification; previous core remains selected")?;
+    if reported_version(&output) != Some(version) {
+        bail!("New core reported a different version than requested {version}; previous core remains selected");
+    }
     Ok(path)
 }
 

@@ -109,9 +109,11 @@ async fn pick_directory(app: tauri::AppHandle) -> Result<Option<String>, String>
             .file()
             .blocking_pick_folder()
             .map(|f| {
-                f.into_path()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .map_err(|e| e.to_string())
+                f.into_path().map_err(|e| e.to_string()).and_then(|p| {
+                    p.into_os_string()
+                        .into_string()
+                        .map_err(|_| "Folder path must use valid UTF-8 characters".to_owned())
+                })
             })
             .transpose()
     })
@@ -127,7 +129,7 @@ async fn open_workspace(state: State<'_, AppManager>, id: String) -> Result<(), 
 }
 #[tauri::command]
 async fn quit_app(app: tauri::AppHandle, state: State<'_, AppManager>) -> Result<(), String> {
-    work(state.inner().clone(), |m| m.stop_all()).await?;
+    work(state.inner().clone(), |m| m.shutdown()).await?;
     app.state::<AtomicBool>().store(true, Ordering::SeqCst);
     app.exit(0);
     Ok(())
@@ -142,7 +144,7 @@ fn show(app: &tauri::AppHandle) {
 fn request_quit(app: tauri::AppHandle) {
     let m = app.state::<AppManager>().inner().clone();
     tauri::async_runtime::spawn(async move {
-        match work(m, |m| m.stop_all()).await {
+        match work(m, |m| m.shutdown()).await {
             Ok(()) => {
                 app.state::<AtomicBool>().store(true, Ordering::SeqCst);
                 app.exit(0);
@@ -160,12 +162,20 @@ fn request_quit(app: tauri::AppHandle) {
     });
 }
 fn main() {
+    if let Some(code) = desktop_manager::supervisor::run_if_requested() {
+        std::process::exit(code);
+    }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
         .plugin(tauri_plugin_dialog::init())
         .manage(AtomicBool::new(false))
         .setup(|app| {
-            let manager = match Manager::default_home().and_then(Manager::open) {
+            let manager = match Manager::default_home().and_then(|home| {
+                #[cfg(unix)]
+                { Manager::open_supervised(home, std::env::current_exe()?) }
+                #[cfg(not(unix))]
+                { Manager::open(home) }
+            }) {
                 Ok(manager)=>manager,
                 Err(error) => {
                     // Never block Tauri's main setup thread waiting for a dialog.

@@ -1,5 +1,12 @@
 export type Language = "en" | "zh";
 const zh: Record<string, string> = {
+  "That workspace is no longer available. Nothing was removed.":
+    "该工作区已不存在，未移除任何其他工作区。",
+  "Stop this workspace before removing it.": "请先停止工作区，再将其移除。",
+  "Log output was truncated or restarted. Showing the latest available segment.":
+    "日志已截断或重新开始，正在显示最新可用片段。",
+  "After restarting or upgrading the core, reconnect your MCP client. If authorization fails, remove this server's saved authorization in the client and sign in again using the password from Show credentials.":
+    "重启或升级核心后，请重新连接 MCP 客户端。如果授权失败，请移除该服务器在客户端中的已保存授权，并使用“显示凭据”中的密码重新登录。",
   "Tool-call history requires a core with event-journal support. You can configure one in Settings.":
     "工具调用历史需要支持事件日志的核心，可以在设置中配置。",
   "Tool history unavailable": "工具调用历史不可用",

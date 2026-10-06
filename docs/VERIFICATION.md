@@ -1,15 +1,15 @@
 # Verification record
 
-Validated locally on October 6, 2026. These checks are not a claim of completed CI, a tested signed release, or live Cloudflare setup.
+Validation record on October 6, 2026. [Draft PR #1](https://github.com/coding-tools-mcp/desktop/pull/1) baseline `6f4a1f07c1f49abbd0a5785aef38713f226754aa` passed [all 11 CI jobs](https://github.com/coding-tools-mcp/desktop/actions/runs/37430644696). Later hardening is distinguished below; none of these checks claims a signed release or live Cloudflare setup.
 
 ## Passed
 
-- Rust manager: **20 tests** (6 unit/storage/history/privacy, 7 lifecycle, 7 independent review regressions). The external-core acceptance test is opt-in and was run separately below.
+- Rust manager baseline: **20 tests** (6 unit/storage/history/privacy, 7 lifecycle, 7 independent review regressions). The external-core acceptance test is opt-in and was run separately below.
 - Rust formatting and Clippy, all manager targets, `-D warnings`.
-- **Windows GNU cross-target manager compilation and Clippy** passed, including the Windows suspended-process/job-object APIs. Windows runtime execution was not performed.
+- **Windows GNU cross-target manager compilation and Clippy** passed, including the Windows suspended-process/job-object APIs. Native Windows runtime tests and full build also passed on the baseline CI.
 - **Full Linux native Tauri compilation and executable build** passed. Signed Debian development packages were installed in a private build prefix because system package installation was unavailable.
 - Python checks: **6 tests** (5 compatibility-launcher checks and 1 DNS-free HTTP fixture check), Ruff, wheel + source-distribution builds, and Twine package checks passed. The wheel retains the import/console-entrypoint/NOTICE boundary and contains no Python core or Qt implementation.
-- React/TypeScript: **19 rendered component/IPC flow tests**, strict TypeScript, formatting and Vite production build passed.
+- React/TypeScript baseline: **19 rendered component/IPC flow tests**, strict TypeScript, formatting and Vite production build passed.
 - External published `coding-tools-mcp==0.5.0`: real initialize, tools/list, successful and failed read_file calls, explicit unsupported-history detection and confirmed stop/port release passed.
 - External unchanged official commit `d7c2dda48bcedbd066c7dbc24a1b63205384d269`: the same real MCP flow, actual per-call journal entries, outcomes, durations and diagnostics passed.
 
@@ -17,19 +17,30 @@ All final external-core tests and launched core processes use the official docum
 
 ## Hosted browser review
 
-The initial GitHub run produced authentic light/dark, narrow-screen and tunnel-failure screenshots. These were downloaded and visually inspected: text and controls were readable, narrow content stacked without horizontal overflow, and local/public status remained distinct. Mock screenshots are visibly labeled. Three browser test-harness defects were corrected for the next run; final browser suite status must be checked on the latest head.
+The initial GitHub run produced authentic light/dark, narrow-screen and tunnel-failure screenshots. These were downloaded and visually inspected: text and controls were readable, narrow content stacked without horizontal overflow, and local/public status remained distinct. Mock screenshots are visibly labeled. All **12/12 Playwright flows** passed on the green baseline head, including the corrected harness checks. New hardening still requires its own exact-head CI result.
 
 ## Prepared but not completed locally
 
 - **12 real-browser Playwright flows** and five screenshot captures are implemented. Chromium failed before opening a page (`socket() EPERM`); a separate browser route rejected the local development URL. No screenshot was invented or substituted; later hosted-run screenshots are described above. See [visual verification instructions](../screenshots/README.md).
 - Native Linux visual testing was attempted using the built executable, but this host lacks WebKit's compiled-in system helper path. Relocated libraries support compilation but cannot replace an installed WebKit runtime.
-- macOS runtime/build and Windows runtime/native-installer tests require their native CI runners. Cross-compilation is not runtime acceptance.
+- macOS and Windows native builds/runtime tests and both external-core acceptance fixtures passed on the baseline CI. Native installer, tray and first-run interactive smoke testing remain separate; cross-compilation is not runtime acceptance.
 - No live Cloudflare login, certificate grant, tunnel, DNS route, or token was exercised. The lifecycle edge cases use explicitly mocked local cloudflared processes.
 - Managed version install/rollback logic is covered by command/verification and concurrency checks, but interactive installation across all three operating systems is not yet verified.
 
 ## Review regressions
 
 The independent review added executable tests for root-exit process-tree cleanup (including unobserved children), migrated public/noauth rejection, crashed-workspace tunnel cleanup, credential-header redaction, in-flight activity during a busy tunnel startup and after stop, and responsive snapshots during a slow core rollback probe.
+
+## Additional hardening under verification
+
+The full current Rust suite passes **55 active tests** locally (11 unit/admission, 9 lifecycle, 22 persistence/install/tunnel, 7 ownership regressions and 6 supervisor lifecycle). Two intentional ignores are the external-core acceptance entry and a private subprocess fixture.
+
+- Frontend: **39 tests** pass locally, adding destructive-target confirmation, single-flight polling, stale response/copy cancellation, log rotation/truncation and OAuth reauthorization guidance. Strict types, formatting, build and npm audit pass.
+- Persistence/install/tunnel boundary: **22 regression cases** pass locally, using local mock executables only. They cover failed install/rollback/config writes, exact version validation, executable discovery, duplicate/case-alias IDs, tunnel retry identity and DNS validation, and ambient Cloudflare environment/config isolation.
+- Unix supervision: **six real-process lifecycle tests** pass locally, including abrupt desktop death, pipe non-inheritance, independent instances, resistant descendants, helper death, exact exit codes, argv/environment/cwd and real resource metrics. Independent review found no blocking issue; macOS verification is pending the next CI run.
+- Manager lifecycle now runs through the actual supervisor helper on Unix. Stale-deleted saves, case aliases, busy-operation shutdown recovery, diagnostic admission and shutdown admission have additional regressions. Both real-core fixtures pass locally through the supervisor with documented telemetry opt-out; the real Linux native binary also passes the nine active lifecycle flows through its private headless entry.
+- A native Linux WebKit/Selenium smoke is being added to CI with the exact unchanged event-capable core, isolated HOME/workspace and genuine native screenshots. Its first hosted result is pending; OS picker/tray and installer checks remain manual gates.
+- Full Linux build through the actual Tauri CLI passed. Native CI now runs that CLI instead of only Cargo; a separate PR workflow builds unsigned Linux/macOS/Windows review bundles without publishing a release. Exact matching Tauri npm minor versions prevent a packaging mismatch that a Cargo-only build did not detect.
 
 ## Next gate
 

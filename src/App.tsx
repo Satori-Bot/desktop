@@ -62,6 +62,8 @@ export type RunAction = <T>(
   fn: () => Promise<T>,
   success?: string,
 ) => Promise<T | undefined>;
+type Confirmation =
+  { kind: "delete"; id: string; name: string } | { kind: "quit" };
 type Page =
   "Dashboard" | "Connections" | "Activity" | "Diagnostics" | "Settings";
 const navigation = [
@@ -82,11 +84,12 @@ export default function App() {
   const [busy, setBusy] = useState("");
   const lock = useRef(false);
   const request = useRef(0);
+  const snapshotFlight = useRef<Promise<void> | null>(null);
   const mounted = useRef(true);
   const [workspaceModal, setWorkspaceModal] = useState<
     Workspace | null | undefined
   >(undefined);
-  const [confirm, setConfirm] = useState<"delete" | "quit" | null>(null);
+  const [confirm, setConfirm] = useState<Confirmation | null>(null);
   const [calls, setCalls] = useState<Activity[]>([]);
   const [activityError, setActivityError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -98,24 +101,34 @@ export default function App() {
   const active = isActive(status);
   const transitional =
     status?.state === "starting" || status?.state === "stopping";
-  const refresh = useCallback(async () => {
+  const refresh = useCallback((afterMutation = false): Promise<void> => {
+    // Polling joins an outstanding read rather than continually invalidating a slow response.
+    // A completed mutation may explicitly supersede an older read with a fresh snapshot.
+    if (snapshotFlight.current && !afterMutation) return snapshotFlight.current;
     const sequence = ++request.current;
-    try {
-      const next = await api.snapshot();
-      if (!mounted.current || sequence !== request.current) return;
-      setSnapshot(next);
-      setSelected((id) =>
-        next.workspaces.some((w) => w.id === id)
-          ? id
-          : (next.workspaces[0]?.id ?? ""),
-      );
-      setLoadError("");
-    } catch (e) {
-      if (mounted.current && sequence === request.current)
-        setLoadError(errorText(e));
-    } finally {
-      if (mounted.current && sequence === request.current) setLoading(false);
-    }
+    const flight = (async () => {
+      try {
+        const next = await api.snapshot();
+        if (!mounted.current || sequence !== request.current) return;
+        setSnapshot(next);
+        setSelected((id) =>
+          next.workspaces.some((w) => w.id === id)
+            ? id
+            : (next.workspaces[0]?.id ?? ""),
+        );
+        setLoadError("");
+      } catch (e) {
+        if (mounted.current && sequence === request.current)
+          setLoadError(errorText(e));
+      } finally {
+        if (mounted.current && sequence === request.current) setLoading(false);
+      }
+    })();
+    snapshotFlight.current = flight;
+    void flight.then(() => {
+      if (snapshotFlight.current === flight) snapshotFlight.current = null;
+    });
+    return flight;
   }, []);
   useEffect(() => {
     mounted.current = true;
@@ -143,21 +156,23 @@ export default function App() {
   }, [notice]);
   useEffect(() => {
     let cancelled = false;
-    let activityRequest = 0;
+    let activityPending = false;
     setCalls([]);
     setActivityError("");
     if (!selected || !available) return;
     const update = async () => {
-      const sequence = ++activityRequest;
+      if (activityPending) return;
+      activityPending = true;
       try {
         const next = await api.activity(selected);
-        if (!cancelled && sequence === activityRequest) {
+        if (!cancelled) {
           setCalls(next);
           setActivityError("");
         }
       } catch (e) {
-        if (!cancelled && sequence === activityRequest)
-          setActivityError(errorText(e));
+        if (!cancelled) setActivityError(errorText(e));
+      } finally {
+        activityPending = false;
       }
     };
     void update();
@@ -166,7 +181,7 @@ export default function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [selected, available]);
+  }, [selected, available, status?.pid]);
   const run: RunAction = async (key, fn, success) => {
     if (lock.current) return;
     lock.current = true;
@@ -176,7 +191,7 @@ export default function App() {
       const result = await fn();
       if (mounted.current) {
         if (success) setNotice(success);
-        await refresh();
+        await refresh(true);
       }
       return result;
     } catch (e) {
@@ -206,10 +221,9 @@ export default function App() {
       current
         ? {
             ...current,
-            workspaces: [
-              ...current.workspaces.filter((w) => w.id !== next.id),
-              next,
-            ],
+            workspaces: current.workspaces.some((w) => w.id === next.id)
+              ? current.workspaces.map((w) => (w.id === next.id ? next : w))
+              : [...current.workspaces, next],
           }
         : current,
     );
@@ -218,20 +232,39 @@ export default function App() {
   }
   const closeEditor = () => {
     setWorkspaceModal(undefined);
-    void refresh();
+    void refresh(true);
   };
   async function confirmed() {
-    if (confirm === "delete" && workspace) {
+    if (confirm?.kind === "delete") {
+      const target = snapshot?.workspaces.find(
+        (item) => item.id === confirm.id,
+      );
+      if (!target) {
+        setConfirm(null);
+        setError(
+          t("That workspace is no longer available. Nothing was removed."),
+        );
+        return;
+      }
+      if (
+        isActive(
+          snapshot?.statuses.find((item) => item.workspaceId === target.id),
+        )
+      ) {
+        setConfirm(null);
+        setError(t("Stop this workspace before removing it."));
+        return;
+      }
       const result = await run(
         "delete",
         async () => {
-          await api.deleteWorkspace(workspace.id);
+          await api.deleteWorkspace(target.id);
           return true;
         },
         t("Operation completed"),
       );
       if (result) setConfirm(null);
-    } else if (confirm === "quit") {
+    } else if (confirm?.kind === "quit") {
       await run("quit", api.quit);
     }
   }
@@ -455,7 +488,7 @@ export default function App() {
               cloudflaredAvailable={snapshot?.cloudflaredAvailable ?? null}
               run={run}
               busy={busy}
-              onQuit={() => setConfirm("quit")}
+              onQuit={() => setConfirm({ kind: "quit" })}
               workspace={workspace}
               status={status}
               onSaved={(w) => saved(w, false)}
@@ -770,7 +803,13 @@ export default function App() {
                   busy={busy}
                   t={t}
                   onEdit={() => setWorkspaceModal(workspace)}
-                  onRemove={() => setConfirm("delete")}
+                  onRemove={() =>
+                    setConfirm({
+                      kind: "delete",
+                      id: workspace.id,
+                      name: workspace.name,
+                    })
+                  }
                   onCopy={copy}
                   onSaved={(w) => saved(w, false)}
                 />
@@ -828,16 +867,16 @@ export default function App() {
       {confirm && (
         <ConfirmModal
           title={t(
-            confirm === "delete"
+            confirm.kind === "delete"
               ? "Remove this workspace?"
               : "Quit and stop services?",
           )}
-          detail={t(
-            confirm === "delete"
+          detail={`${confirm.kind === "delete" ? `${confirm.name}\n` : ""}${t(
+            confirm.kind === "delete"
               ? "This removes the saved configuration. Your source files are never deleted. Backups and logs are retained."
               : "All running workspaces will be stopped.",
-          )}
-          label={t(confirm === "delete" ? "Remove" : "Quit")}
+          )}`}
+          label={t(confirm.kind === "delete" ? "Remove" : "Quit")}
           onConfirm={() => void confirmed()}
           onClose={() => setConfirm(null)}
           busy={!!busy}

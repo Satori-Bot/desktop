@@ -4,6 +4,7 @@ use fs2::FileExt;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -50,6 +51,19 @@ pub fn private_json<T: Serialize>(path: &Path, data: &T) -> Result<()> {
 pub fn valid_id(id: &str) -> Result<()> {
     if id.len() != 32 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
         bail!("Invalid workspace ID");
+    }
+    Ok(())
+}
+fn validate_config(config: &Config) -> Result<()> {
+    if config.schema_version != 2 {
+        bail!("Unsupported configuration version; use a compatible desktop release");
+    }
+    let mut ids = HashSet::new();
+    for w in &config.workspaces {
+        valid_id(&w.id)?;
+        if !ids.insert(w.id.to_ascii_lowercase()) {
+            bail!("Configuration contains duplicate workspace IDs; original files were preserved");
+        }
     }
     Ok(())
 }
@@ -117,6 +131,7 @@ impl Storage {
         Ok(path)
     }
     pub fn save(&self, config: &Config) -> Result<()> {
+        validate_config(config)?;
         private_json(&self.home.join("desktop-v2.json"), config)
     }
     pub fn load(&self) -> Result<(Config, Option<String>)> {
@@ -124,12 +139,7 @@ impl Storage {
         if path.exists() {
             let config: Config = serde_json::from_slice(&fs::read(path)?)
                 .context("Configuration is invalid; restore a backup rather than overwriting it")?;
-            if config.schema_version != 2 {
-                bail!("Unsupported configuration version; use a compatible desktop release");
-            }
-            for w in &config.workspaces {
-                valid_id(&w.id)?;
-            }
+            validate_config(&config)?;
             return Ok((config, None));
         }
         let legacy = self.home.join("profiles.json");
@@ -146,6 +156,7 @@ impl Storage {
             serde_json::json!({})
         };
         let mut config = Config::default();
+        let mut ids = HashSet::new();
         for p in old
             .get("profiles")
             .and_then(Value::as_array)
@@ -156,6 +167,9 @@ impl Storage {
                 .context("Legacy workspace ID missing")?
                 .to_string();
             valid_id(&id)?;
+            if !ids.insert(id.to_ascii_lowercase()) {
+                bail!("Legacy profiles contain duplicate workspace IDs; no files were changed");
+            }
             let text = |key: &str| {
                 p.pointer(key)
                     .and_then(Value::as_str)

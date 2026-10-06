@@ -6,9 +6,10 @@ use crate::{
 use anyhow::bail;
 use anyhow::{Context, Result};
 use std::{
+    ffi::OsStr,
     io::Read,
-    path::PathBuf,
-    process::{Child, Command, Stdio},
+    path::{Path, PathBuf},
+    process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -17,6 +18,24 @@ use std::{
 use sysinfo::Signal;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
+/// Construct the command before applying argv, environment (including
+/// env_clear), or current_dir, so wrapping never reconstructs those settings.
+/// The supervisor executable must be an absolute path to this native binary.
+pub fn command(program: impl AsRef<OsStr>, supervisor: Option<&Path>) -> Command {
+    #[cfg(unix)]
+    if let Some(executable) = supervisor {
+        let mut command = Command::new(executable);
+        command
+            .arg(crate::supervisor::ARGUMENT)
+            .arg("--")
+            .arg(program);
+        return command;
+    }
+    #[cfg(not(unix))]
+    let _ = supervisor;
+    Command::new(program)
+}
+
 pub struct ManagedProcess {
     child: Child,
     pub started: Instant,
@@ -24,15 +43,42 @@ pub struct ManagedProcess {
     descendants: Vec<(u32, u64)>,
     system: System,
     readers: Vec<thread::JoinHandle<()>>,
+    // Only the desktop owns this writer. CLOEXEC prevents other launched
+    // services from keeping their siblings' supervisors alive after app death.
+    liveness: Option<ChildStdin>,
+    supervised: bool,
     #[cfg(windows)]
     job: WindowsJob,
 }
 impl ManagedProcess {
     pub fn spawn(command: &mut Command, log: PathBuf, secrets: Secrets) -> Result<Self> {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        Self::spawn_inner(command, Some((log, secrets)), false)
+    }
+    /// The command must have been constructed with process::command and a
+    /// supervisor path, before its args/environment/current_dir were applied.
+    #[cfg(unix)]
+    pub fn spawn_supervised(command: &mut Command, log: PathBuf, secrets: Secrets) -> Result<Self> {
+        Self::spawn_inner(command, Some((log, secrets)), true)
+    }
+    #[cfg(unix)]
+    pub(crate) fn spawn_inherited(command: &mut Command) -> Result<Self> {
+        Self::spawn_inner(command, None, false)
+    }
+    fn spawn_inner(
+        command: &mut Command,
+        logging: Option<(PathBuf, Secrets)>,
+        supervised: bool,
+    ) -> Result<Self> {
+        command.stdin(if supervised {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+        if logging.is_some() {
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        } else {
+            command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -55,6 +101,18 @@ impl ManagedProcess {
                 return Err(e);
             }
         };
+        let liveness = child.stdin.take();
+        #[cfg(unix)]
+        if let Some(pipe) = &liveness {
+            use std::os::fd::AsRawFd;
+            // Rust's process pipes are already CLOEXEC. Enforce that invariant
+            // explicitly, rather than relying on it at this ownership boundary.
+            if let Err(error) = crate::supervisor::close_on_exec(pipe.as_raw_fd()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
         let lock = Arc::new(Mutex::new(()));
         fn pipe(
             mut input: impl Read + Send + 'static,
@@ -100,13 +158,18 @@ impl ManagedProcess {
                 }
             })
         }
-        let stdout = pipe(
-            child.stdout.take().unwrap(),
-            log.clone(),
-            secrets.clone(),
-            lock.clone(),
-        );
-        let stderr = pipe(child.stderr.take().unwrap(), log, secrets, lock);
+        let readers = if let Some((log, secrets)) = logging {
+            let stdout = pipe(
+                child.stdout.take().unwrap(),
+                log.clone(),
+                secrets.clone(),
+                lock.clone(),
+            );
+            let stderr = pipe(child.stderr.take().unwrap(), log, secrets, lock);
+            vec![stdout, stderr]
+        } else {
+            vec![]
+        };
         let mut system = System::new();
         system.refresh_processes(ProcessesToUpdate::All, true);
         Ok(Self {
@@ -115,7 +178,9 @@ impl ManagedProcess {
             reaped: false,
             descendants: vec![],
             system,
-            readers: vec![stdout, stderr],
+            readers,
+            liveness,
+            supervised,
             #[cfg(windows)]
             job,
         })
@@ -147,6 +212,17 @@ impl ManagedProcess {
         } else {
             Some(info)
         }
+    }
+    #[cfg(unix)]
+    pub(crate) fn exit_code(&mut self) -> Option<i32> {
+        self.exit_info().map(|s| {
+            let status = unsafe { s.si_status() };
+            if s.si_code == libc::CLD_EXITED {
+                status
+            } else {
+                128 + status
+            }
+        })
     }
     pub fn succeeded(&mut self) -> bool {
         #[cfg(unix)]
@@ -204,8 +280,19 @@ impl ManagedProcess {
                 .process(Pid::from_u32(*pid))
                 .is_some_and(|p| p.start_time() == *start)
         });
-        let p = self.system.process(Pid::from_u32(self.pid()));
-        p.map(|p| (p.cpu_usage(), p.memory())).unwrap_or((0., 0))
+        if self.supervised {
+            // The helper is only an owner. Report the core/tunnel process tree,
+            // including children, rather than the tiny wrapper's resource use.
+            self.descendants
+                .iter()
+                .filter_map(|(pid, _)| self.system.process(Pid::from_u32(*pid)))
+                .fold((0., 0u64), |(cpu, memory), p| {
+                    (cpu + p.cpu_usage(), memory.saturating_add(p.memory()))
+                })
+        } else {
+            let p = self.system.process(Pid::from_u32(self.pid()));
+            p.map(|p| (p.cpu_usage(), p.memory())).unwrap_or((0., 0))
+        }
     }
     fn identity_matches(&self, pid: u32, start: u64) -> bool {
         self.system
@@ -222,6 +309,17 @@ impl ManagedProcess {
         }
         if !self.reaped {
             self.metrics();
+            if self.supervised {
+                // EOF asks the helper to stop/reap its separately owned group.
+                // Its normal cleanup is bounded by 3s graceful + 2s forced;
+                // allow headroom before applying our emergency fallback.
+                drop(self.liveness.take());
+                let until = Instant::now() + Duration::from_secs(8);
+                while self.alive() && Instant::now() < until {
+                    thread::sleep(Duration::from_millis(40));
+                }
+                self.metrics();
+            }
             #[cfg(windows)]
             self.job.terminate()?;
             #[cfg(unix)]

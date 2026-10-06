@@ -12,9 +12,11 @@ Mock screenshots have a visible purple `TEST FIXTURE / MOCKED IPC` banner. Mock 
 
 ## Hosted-browser evidence
 
-GitHub-hosted Chromium ran the suite for commit `5291a3ee6b0d335723473baae5acb3ea9ceacb3d` on October 6, 2026. Nine of twelve tests passed, including light/dark dashboard screenshots, public-tunnel failure, and the narrow-viewport overflow check. Three test-harness defects were identified: an ambiguous preview locator, a stopped fixture retaining a live PID, and a non-idempotent log fixture under React StrictMode. The harness fixes require a subsequent CI run before the entire browser suite can be called passing.
+GitHub-hosted Chromium passed all 12 browser flows for commit `6f4a1f07c1f49abbd0a5785aef38713f226754aa` on October 6, 2026 ([successful browser job](https://github.com/coding-tools-mcp/desktop/actions/runs/37430644696/job/112160445224)). This includes onboarding/back/cancel/retry, repeated actions, independent local/public failure states, filtering, language changes, incremental logs, diagnostics export, and the narrow-viewport overflow check.
 
-The generated [browser artifact](https://github.com/coding-tools-mcp/desktop/actions/runs/37428472037/artifacts/11395767637) was downloaded through the supported GitHub artifact API and visually inspected. Light, dark, narrow, public-failure, and the backend-unavailable failure capture have clear status separation, readable controls, and no observed clipping or horizontal overflow. The unavailable capture comes from Playwright's failure screenshot, since the ambiguous locator stopped that test before its named screenshot step.
+The five PNGs in the [browser artifact](https://github.com/coding-tools-mcp/desktop/actions/runs/37430644696/artifacts/11396717236) were retrieved through the supported GitHub artifact API and visually inspected. Light, dark, narrow, public-failure, and backend-unavailable screens have clear status separation, readable controls, and no observed clipping or horizontal overflow. Mock runtime screenshots retain their visible fixture banner.
+
+This evidence applies to that exact commit. Later source changes require their own hosted run before claiming equivalent browser coverage.
 
 ## Local native verification limit
 
