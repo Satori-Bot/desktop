@@ -315,7 +315,8 @@ test("diagnostics, incremental logs and redacted download are explicit actions",
     cursor: 1,
     kind: "runtime",
   });
-  await page.getByRole("radio", { name: "Tunnel logs" }).click();
+  await page.getByText("Tunnel logs", { exact: true }).click();
+  await expect(page.getByRole("radio", { name: "Tunnel logs" })).toBeChecked();
   await expect(
     page.getByText("TEST FIXTURE tunnel line 1", { exact: false }),
   ).toBeVisible();

@@ -220,9 +220,11 @@ impl ManagedProcess {
             self.job.terminate()?;
             #[cfg(unix)]
             {
-                // Never signal a remembered PID unless its birth time still matches.
-                if !self.reaped && unsafe { libc::getpgid(self.pid() as i32) } == self.pid() as i32
-                {
+                // WNOWAIT reserves our child's PID and original group ID.
+                // Darwin getpgid rejects zombie leaders, so it cannot validate
+                // this ownership. Refresh wait ownership; ECHILD fails closed.
+                let _ = self.exit_info();
+                if !self.reaped {
                     unsafe {
                         libc::kill(-(self.pid() as i32), libc::SIGTERM);
                     }
@@ -243,9 +245,12 @@ impl ManagedProcess {
                 let _ = self.child.kill();
             }
             #[cfg(unix)]
-            if !self.reaped && unsafe { libc::getpgid(self.pid() as i32) } == self.pid() as i32 {
-                unsafe {
-                    libc::kill(-(self.pid() as i32), libc::SIGKILL);
+            {
+                let _ = self.exit_info();
+                if !self.reaped {
+                    unsafe {
+                        libc::kill(-(self.pid() as i32), libc::SIGKILL);
+                    }
                 }
             }
             // Also clean children that left the original group but were observed.
@@ -257,6 +262,15 @@ impl ManagedProcess {
                         let _ = p.kill();
                     }
                 }
+            }
+            let forced_deadline = Instant::now() + Duration::from_secs(2);
+            while self.alive() && Instant::now() < forced_deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            if self.alive() {
+                return Err(anyhow::anyhow!(
+                    "Could not confirm child process exit after forced termination"
+                ));
             }
             self.child
                 .wait()
