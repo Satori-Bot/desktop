@@ -916,4 +916,198 @@ describe("saved drafts and accessible history", () => {
     ).toBeDisabled();
     expect(count("save_workspace")).toBe(1);
   });
+
+  it.each(["Escape", "Cancel", "Close"])(
+    "returns focus to the editor trigger after repeated %s dismissal",
+    async (dismissal) => {
+      snapshot = fixtureSnapshot({ stopped: true });
+      await mount();
+      await navigate("Connections");
+      const edit = screen.getByRole("button", { name: "Edit workspace" });
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        edit.focus();
+        fireEvent.click(edit);
+        const dialog = screen.getByRole("dialog", { name: "Edit workspace" });
+        const input = within(dialog).getByLabelText("Workspace name", {
+          exact: false,
+        });
+        input.focus();
+        expect(input).toHaveFocus();
+        if (dismissal === "Escape") fireEvent.keyDown(input, { key: "Escape" });
+        else
+          fireEvent.click(
+            within(dialog).getByRole("button", { name: dismissal }),
+          );
+        await tick(20);
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+        expect(edit).toHaveFocus();
+        expect(
+          within(screen.getByRole("navigation")).getByRole("button", {
+            name: "Connections",
+          }),
+        ).toHaveAttribute("aria-current", "page");
+      }
+      expect(count("save_workspace")).toBe(0);
+    },
+  );
+
+  it.each([
+    {
+      page: "Connections",
+      trigger: "Remove workspace",
+      title: "Remove this workspace?",
+    },
+    {
+      page: "Settings",
+      trigger: "Quit application",
+      title: "Quit and stop services?",
+    },
+    {
+      page: "Connections",
+      trigger: "Create tunnel and DNS",
+      title: "Create tunnel and DNS",
+    },
+  ])(
+    "returns focus when the $trigger confirmation is cancelled",
+    async ({ page, trigger, title }) => {
+      snapshot = fixtureSnapshot({ stopped: true, tunnelFailure: true });
+      await mount();
+      await navigate(page);
+      const opener = screen.getByRole("button", { name: trigger });
+      opener.focus();
+      fireEvent.click(opener);
+      const dialog = screen.getByRole("dialog", { name: title });
+      within(dialog).getByRole("checkbox").focus();
+      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      await tick(20);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(opener).toHaveFocus();
+      expect(count("delete_workspace")).toBe(0);
+      expect(count("quit_app")).toBe(0);
+      expect(count("setup_named_tunnel")).toBe(0);
+    },
+  );
+
+  it("does not restore a tunnel confirmation's focus after its page is removed", async () => {
+    snapshot = fixtureSnapshot({ stopped: true, tunnelFailure: true });
+    await mount();
+    await navigate("Connections");
+    const opener = screen.getByRole("button", {
+      name: "Create tunnel and DNS",
+    });
+    opener.focus();
+    fireEvent.click(opener);
+    screen.getByRole("checkbox", { name: "Create tunnel and DNS" }).focus();
+    const restore = vi.spyOn(opener, "focus");
+    await navigate("Dashboard");
+    const dashboard = within(screen.getByRole("navigation")).getByRole(
+      "button",
+      { name: "Dashboard" },
+    );
+    dashboard.focus();
+    await tick(20);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(dashboard).toHaveFocus();
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it("does not pull focus back to the persistent New workspace button after successful save navigation", async () => {
+    snapshot = fixtureSnapshot({ stopped: true });
+    invoke.mockImplementation((command, args) => {
+      if (command === "save_workspace") {
+        const saved = {
+          ...(args?.workspace as Workspace),
+          id: "created-workspace",
+        };
+        snapshot.workspaces.push(saved);
+        return Promise.resolve(saved);
+      }
+      return defaultInvoke(command, args);
+    });
+    await mount();
+    await navigate("Connections");
+    const opener = screen.getByRole("button", { name: "New workspace" });
+    opener.focus();
+    fireEvent.click(opener);
+    const input = screen.getByLabelText("Workspace name", { exact: false });
+    input.focus();
+    fireEvent.change(input, { target: { value: "Created project" } });
+    fireEvent.change(screen.getByLabelText("Folder path", { exact: false }), {
+      target: { value: "/fixture/created" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    const restore = vi.spyOn(opener, "focus");
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Create workspace" })),
+    );
+    await tick(20);
+    expect(
+      screen.getByRole("heading", { name: "Created project" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(
+      within(screen.getByRole("navigation")).getByRole("button", {
+        name: "Dashboard",
+      }),
+    ).toHaveAttribute("aria-current", "page");
+    expect(opener).toBeInTheDocument();
+    expect(opener).not.toHaveFocus();
+    expect(restore).not.toHaveBeenCalled();
+    expect(count("save_workspace")).toBe(1);
+  });
+
+  it("preserves the current focus when polling replaces the editor's workspace and opener before dismissal", async () => {
+    snapshot = fixtureSnapshot({ stopped: true });
+    addSecondWorkspace();
+    await mount();
+    await navigate("Connections");
+    const previousOpener = screen.getByRole("button", {
+      name: "Edit workspace",
+    });
+    previousOpener.focus();
+    fireEvent.click(previousOpener);
+    const dialog = screen.getByRole("dialog", { name: "Edit workspace" });
+    within(dialog).getByLabelText("Workspace name", { exact: false }).focus();
+    snapshot.workspaces = snapshot.workspaces.slice(1);
+    snapshot.statuses = snapshot.statuses.slice(1);
+    await tick(4000);
+    expect(previousOpener).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Birch workspace" }),
+    ).toBeInTheDocument();
+    const currentOpener = screen.getByRole("button", {
+      name: "Edit workspace",
+    });
+    currentOpener.focus();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await tick(20);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(currentOpener).toHaveFocus();
+    expect(count("save_workspace")).toBe(0);
+  });
+
+  it("preserves current focus when the editor opener becomes disabled before dismissal", async () => {
+    snapshot = fixtureSnapshot({ stopped: true });
+    await mount();
+    await navigate("Connections");
+    const opener = screen.getByRole("button", { name: "Edit workspace" });
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "Edit workspace" });
+    within(dialog).getByLabelText("Workspace name", { exact: false }).focus();
+    snapshot.statuses[0].cleanupPending = true;
+    await tick(4000);
+    expect(opener).toBeDisabled();
+    const dashboard = within(screen.getByRole("navigation")).getByRole(
+      "button",
+      { name: "Dashboard" },
+    );
+    dashboard.focus();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await tick(20);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(dashboard).toHaveFocus();
+    expect(count("save_workspace")).toBe(0);
+  });
 });

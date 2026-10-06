@@ -685,6 +685,7 @@ for (const language of ["en", "zh"] as const) {
       page.getByText("previous_process_tool", { exact: true }),
     ).toBeVisible();
     await expect(page.getByText("search_code", { exact: true })).toHaveCount(0);
+    await screenshot(page, `activity-interrupted-${language}-test-fixture`);
     await nav(page, t("Connections")).click();
     const edit = page.getByRole("button", {
       name: t("Edit workspace"),
@@ -709,10 +710,47 @@ for (const language of ["en", "zh"] as const) {
     await expect(
       dialog.getByLabel(t("Bearer token"), { exact: true }),
     ).toHaveAttribute("type", "password");
+    await screenshot(page, `workspace-keyboard-focus-${language}-test-fixture`);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
     await expect(edit).toBeFocused();
+    for (const confirmation of [
+      {
+        page: "Connections",
+        trigger: "Remove workspace",
+        title: "Remove this workspace?",
+      },
+      {
+        page: "Settings",
+        trigger: "Quit application",
+        title: "Quit and stop services?",
+      },
+      {
+        page: "Connections",
+        trigger: "Create tunnel and DNS",
+        title: "Create tunnel and DNS",
+      },
+    ]) {
+      await nav(page, t(confirmation.page)).click();
+      const opener = page.getByRole("button", {
+        name: t(confirmation.trigger),
+        exact: true,
+      });
+      await opener.click();
+      const prompt = page.getByRole("dialog", {
+        name: t(confirmation.title),
+        exact: true,
+      });
+      await prompt
+        .getByRole("button", { name: t("Cancel"), exact: true })
+        .click();
+      await expect(prompt).toHaveCount(0);
+      await expect(opener).toBeFocused();
+    }
     expect(await ipcCalls(page, "save_workspace")).toHaveLength(0);
+    expect(await ipcCalls(page, "delete_workspace")).toHaveLength(0);
+    expect(await ipcCalls(page, "quit_app")).toHaveLength(0);
+    expect(await ipcCalls(page, "setup_named_tunnel")).toHaveLength(0);
   });
 }
 

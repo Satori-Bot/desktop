@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useFocusReturn } from "@mantine/hooks";
 import {
   ActionIcon,
   Alert,
@@ -92,6 +93,18 @@ export default function App() {
     Workspace | null | undefined
   >(undefined);
   const [confirm, setConfirm] = useState<Confirmation | null>(null);
+  const editorSaved = useRef(false);
+  const confirmationCompleted = useRef(false);
+  // These dialogs unmount on dismissal. Keep focus-return lifecycle in the
+  // persistent parent so Mantine observes both the opening and closing edges.
+  useFocusReturn({
+    opened: workspaceModal !== undefined,
+    shouldReturnFocus: !editorSaved.current,
+  });
+  useFocusReturn({
+    opened: confirm !== null,
+    shouldReturnFocus: !confirmationCompleted.current,
+  });
   const [calls, setCalls] = useState<Activity[]>([]);
   const [activityError, setActivityError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -223,7 +236,16 @@ export default function App() {
     setMenuOpen(false);
     setFeedback(null);
   }
+  function openEditor(workspace: Workspace | null) {
+    editorSaved.current = false;
+    setWorkspaceModal(workspace);
+  }
+  function openConfirmation(confirmation: Confirmation) {
+    confirmationCompleted.current = false;
+    setConfirm(confirmation);
+  }
   function saved(next: Workspace, navigate = true) {
+    if (workspaceModal !== undefined) editorSaved.current = true;
     ++request.current;
     setSnapshot((current) =>
       current
@@ -283,7 +305,10 @@ export default function App() {
         },
         t("Operation completed"),
       );
-      if (result) setConfirm(null);
+      if (result) {
+        confirmationCompleted.current = true;
+        setConfirm(null);
+      }
     } else if (confirm?.kind === "quit") {
       await run("quit", api.quit);
     }
@@ -328,7 +353,7 @@ export default function App() {
           />
           <button
             className="add-workspace"
-            onClick={() => setWorkspaceModal(null)}
+            onClick={() => openEditor(null)}
             disabled={!!busy}
           >
             <Plus size={15} />
@@ -484,7 +509,7 @@ export default function App() {
               cloudflaredAvailable={snapshot?.cloudflaredAvailable ?? null}
               run={run}
               busy={busy}
-              onQuit={() => setConfirm({ kind: "quit" })}
+              onQuit={() => openConfirmation({ kind: "quit" })}
               onSettingsSaved={settingsSaved}
               workspace={workspace}
               status={status}
@@ -509,7 +534,7 @@ export default function App() {
                   size="md"
                   leftSection={<Plus size={18} />}
                   rightSection={<ArrowRight size={17} />}
-                  onClick={() => setWorkspaceModal(null)}
+                  onClick={() => openEditor(null)}
                 >
                   {t("Create your first workspace")}
                 </Button>
@@ -799,9 +824,9 @@ export default function App() {
                   run={run}
                   busy={busy}
                   t={t}
-                  onEdit={() => setWorkspaceModal(workspace)}
+                  onEdit={() => openEditor(workspace)}
                   onRemove={() =>
-                    setConfirm({
+                    openConfirmation({
                       kind: "delete",
                       id: workspace.id,
                       name: workspace.name,

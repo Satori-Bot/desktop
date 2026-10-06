@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useFocusReturn } from "@mantine/hooks";
 import {
   Alert,
   Badge,
@@ -87,6 +88,11 @@ export function ConnectionsPage({
     }
   });
   const [confirm, setConfirm] = useState(false);
+  const tunnelCreated = useRef(false);
+  useFocusReturn({
+    opened: confirm,
+    shouldReturnFocus: !tunnelCreated.current,
+  });
   const [loginOutput, setLoginOutput] = useState("");
   const [validation, setValidation] = useState("");
   const active = isActive(status);
@@ -114,6 +120,7 @@ export function ConnectionsPage({
       return;
     }
     setValidation("");
+    tunnelCreated.current = false;
     setConfirm(true);
   }
   async function createTunnel() {
@@ -123,6 +130,7 @@ export function ConnectionsPage({
       t("Operation completed"),
     );
     if (pageActive.current && result) {
+      tunnelCreated.current = true;
       setConfirm(false);
       onSaved(result);
     }
