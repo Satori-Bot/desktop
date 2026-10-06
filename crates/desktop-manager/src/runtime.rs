@@ -278,7 +278,9 @@ impl Manager {
         // Re-read after the lifecycle lock: a concurrent edit/delete may have
         // completed since the initial lookup used to locate this stable slot.
         let (w, secrets) = self.workspace(id)?;
-        if session.runtime.as_mut().is_some_and(|p| p.alive()) {
+        if session.runtime.as_mut().is_some_and(|p| p.alive())
+            && !slot.status.lock().unwrap().cleanup_pending
+        {
             return Ok(slot.status.lock().unwrap().clone());
         }
         self.update(&slot, |s| {
@@ -286,6 +288,7 @@ impl Manager {
             s.local_state = "starting".into();
             s.local_message = "Starting the external Python core".into();
         });
+        let mut spawned = false;
         let result = (|| -> Result<()> {
             // A dead leader may still own descendants or undrained readers.
             // Confirm cleanup before replacing either retained process handle.
@@ -300,6 +303,12 @@ impl Manager {
             session.runtime = None;
             session.public_url.clear();
             *slot.run_started_ms.lock().unwrap() = None;
+            self.update(&slot, |s| {
+                *s = Status::stopped(&w);
+                s.state = "starting".into();
+                s.local_state = "starting".into();
+                s.local_message = "Starting the external Python core".into();
+            });
             validate_access(&w, true)?;
             if !Path::new(&w.path).is_dir() {
                 bail!("Workspace folder no longer exists");
@@ -327,7 +336,7 @@ impl Manager {
                 self.supervisor.as_deref(),
             )?;
             #[cfg(unix)]
-            let mut process = if self.supervisor.is_some() {
+            let process = if self.supervisor.is_some() {
                 ManagedProcess::spawn_supervised(
                     &mut cmd,
                     state.join("runtime.log"),
@@ -337,8 +346,14 @@ impl Manager {
                 ManagedProcess::spawn(&mut cmd, state.join("runtime.log"), secrets.clone())?
             };
             #[cfg(not(unix))]
-            let mut process =
+            let process =
                 ManagedProcess::spawn(&mut cmd, state.join("runtime.log"), secrets.clone())?;
+            // Transfer ownership before readiness. If startup or cleanup fails,
+            // Stop/Quit must still be able to retry this exact process handle.
+            session.runtime = Some(process);
+            spawned = true;
+            let process = session.runtime.as_mut().unwrap();
+            self.update(&slot, |s| s.pid = Some(process.pid()));
             // CPython's HTTPServer performs reverse-DNS lookup before listen.
             // Some macOS resolver configurations take >30s; keep protocol
             // readiness mandatory while allowing that supported core to finish.
@@ -364,7 +379,6 @@ impl Manager {
                 thread::sleep(Duration::from_millis(150));
             }
             if !ready {
-                process.stop()?;
                 bail!("Core readiness check timed out: {last}");
             }
             // Seed birth identities before exposing a ready supervisor PID.
@@ -375,7 +389,6 @@ impl Manager {
                 chrono::Utc::now().timestamp_millis()
                     - process.started.elapsed().as_millis() as i64,
             );
-            session.runtime = Some(process);
             let activity_available = state.join("events/journal.lock").is_file();
             self.update(&slot,|s|{s.activity_state=if activity_available{"available"}else{"unavailable"}.into();s.activity_message=if activity_available{"Reading real calls from this core's private event journal"}else{"This core build does not expose a tool-call journal. Published 0.5.0 supports launch and connection; history requires an event-capable official core executable."}.into();});
             self.update(&slot, |s| {
@@ -395,6 +408,18 @@ impl Manager {
         })();
         if let Err(e) = result {
             let mut message = events::redact(&format!("{e:#}"), &secrets);
+            if spawned {
+                if let Some(process) = session.runtime.as_mut() {
+                    match process.stop() {
+                        Ok(()) => session.runtime = None,
+                        Err(cleanup) => message.push_str(&events::redact(
+                            &format!("\nStartup cleanup is not confirmed. Retry Stop before editing or deleting: {cleanup:#}"),
+                            &secrets,
+                        )),
+                    }
+                }
+            }
+            *slot.run_started_ms.lock().unwrap() = None;
             if let Ok(log) = self.logs(id, "runtime", 0) {
                 let lines: Vec<_> = log.text.lines().rev().take(8).collect();
                 let tail = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
@@ -403,10 +428,39 @@ impl Manager {
                     message.push_str(&tail.chars().take(4000).collect::<String>());
                 }
             }
+            let live_pid = session
+                .runtime
+                .as_mut()
+                .and_then(|p| p.alive().then_some(p.pid()));
             self.update(&slot, |s| {
                 s.state = "error".into();
                 s.local_state = "error".into();
                 s.local_message = message.clone();
+                s.pid = live_pid;
+                s.cleanup_pending = session.runtime.is_some() || session.tunnel.is_some();
+                s.cpu_percent = 0.;
+                s.memory_bytes = 0;
+                s.uptime_seconds = 0;
+                s.activity_state = "unknown".into();
+                s.activity_message =
+                    "Core startup did not finish; inspect runtime logs and retry".into();
+                s.public_endpoint.clear();
+                s.public_state = if session.tunnel.is_some() {
+                    "error"
+                } else if w.access == "local" {
+                    "disabled"
+                } else {
+                    "stopped"
+                }
+                .into();
+                s.public_message = if session.tunnel.is_some() {
+                    "Tunnel cleanup is not confirmed. Retry Stop before editing or deleting."
+                } else if w.access == "local" {
+                    "Local access only"
+                } else {
+                    "Local MCP did not start; public access is unavailable"
+                }
+                .into();
             });
             return Err(anyhow!(message));
         }
@@ -424,6 +478,8 @@ impl Manager {
             if let Err(error) = old.stop() {
                 self.update(slot, |s| {
                     s.public_state = "error".into();
+                    s.cleanup_pending = true;
+                    s.public_endpoint.clear();
                     s.public_message = events::redact(&format!("Could not stop the previous tunnel; replacement was not started: {error:#}"), secrets);
                 });
                 return;
@@ -455,16 +511,18 @@ impl Manager {
             s.public_message = "Connecting Cloudflare; local MCP is ready".into();
             s.public_endpoint.clear();
         });
-        let result = self
-            .storage
-            .state_dir(&w.id)
-            .and_then(|dir| tunnel::start_supervised(w, secrets, &dir, self.supervisor.as_deref()));
+        let result = (|| -> Result<String> {
+            let dir = self.storage.state_dir(&w.id)?;
+            let process = tunnel::spawn_supervised(w, secrets, &dir, self.supervisor.as_deref())?;
+            session.tunnel = Some(process);
+            tunnel::wait_connected(session.tunnel.as_mut().unwrap(), w, secrets, &dir)
+        })();
         match result {
-            Ok((process, url)) => {
-                session.tunnel = Some(process);
+            Ok(url) => {
                 session.public_url = url.clone();
                 self.update(slot, |s| {
                     s.public_state = "connected".into();
+                    s.cleanup_pending = false;
                     s.public_message = if w.access == "quick" {
                         "Temporary tunnel connected. Address changes when restarted."
                     } else {
@@ -474,11 +532,21 @@ impl Manager {
                     s.public_endpoint = format!("{url}/mcp");
                 });
             }
-            Err(e) => self.update(slot, |s| {
-                s.public_state = "error".into();
-                s.public_message = events::redact(&e.to_string(), secrets);
-                s.public_endpoint.clear();
-            }),
+            Err(e) => {
+                let mut message = format!("{e:#}");
+                if let Some(process) = session.tunnel.as_mut() {
+                    match process.stop() {
+                        Ok(()) => session.tunnel = None,
+                        Err(cleanup) => message.push_str(&format!("\nTunnel cleanup is not confirmed. Retry Stop or public access: {cleanup:#}")),
+                    }
+                }
+                self.update(slot, |s| {
+                    s.public_state = "error".into();
+                    s.cleanup_pending = session.tunnel.is_some();
+                    s.public_message = events::redact(&message, secrets);
+                    s.public_endpoint.clear();
+                });
+            }
         }
     }
     pub fn retry_tunnel(&self, id: &str) -> Result<Status> {
@@ -533,10 +601,30 @@ impl Manager {
             Ok(())
         })();
         if let Err(e) = result {
+            let live_pid = session
+                .runtime
+                .as_mut()
+                .and_then(|p| p.alive().then_some(p.pid()));
             self.update(&slot, |s| {
                 s.state = "error".into();
                 s.local_state = "error".into();
                 s.local_message = e.to_string();
+                s.pid = live_pid;
+                s.cleanup_pending = true;
+                s.public_endpoint.clear();
+                s.public_state = if session.tunnel.is_some() {
+                    "error"
+                } else if w.access == "local" {
+                    "disabled"
+                } else {
+                    "stopped"
+                }
+                .into();
+                if live_pid.is_none() {
+                    s.cpu_percent = 0.;
+                    s.memory_bytes = 0;
+                    s.uptime_seconds = 0;
+                }
             });
             return Err(e);
         }
@@ -586,8 +674,10 @@ impl Manager {
                             events::redact(&format!("Python core exited; cleanup is not confirmed. Retry Stop before editing or deleting. {}", cleanup_errors.join("; ")), secrets)
                         };
                         s.pid = None;
+                        s.cleanup_pending = session.runtime.is_some() || session.tunnel.is_some();
                         s.cpu_percent = 0.;
                         s.memory_bytes = 0;
+                        s.uptime_seconds = 0;
                         s.public_state = if tunnel_cleanup_pending {
                             "error"
                         } else if w.access == "local" {
@@ -634,6 +724,7 @@ impl Manager {
                     let secrets = &secret;
                     self.update(&slot,|s|{
                         s.public_state="error".into();
+                        s.cleanup_pending = session.tunnel.is_some() || (s.state == "error" && session.runtime.is_some());
                         s.public_message=match cleanup {
                             Ok(()) => "Cloudflare process exited. Local MCP is still available; retry public access.".into(),
                             Err(error) => events::redact(&format!("Cloudflare exited but cleanup is not confirmed. Retry Stop or public access: {error:#}"), secrets),
@@ -913,7 +1004,8 @@ impl Manager {
                 .try_lock()
                 .map(|s| s.runtime.is_some() || s.tunnel.is_some())
                 .unwrap_or(true);
-            if managed {
+            let cleanup_pending = slot.status.lock().unwrap().cleanup_pending;
+            if managed || cleanup_pending {
                 if let Err(e) = self.stop(&w.id) {
                     errors.push(e.to_string());
                 }
@@ -949,6 +1041,39 @@ mod admission_regressions {
             .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
         let executable = core::find_program(&name).expect("Python fixture executable");
         vec![executable.to_string_lossy().into(), "-c".into(), script]
+    }
+
+    #[test]
+    fn failed_start_clears_stale_runtime_and_public_readiness() {
+        let (_directory, manager, mut workspace) = fixture();
+        workspace.core_command = python_command("raise SystemExit(2)".into());
+        let workspace = manager.save_workspace(workspace, None).unwrap();
+        let slot = manager.slot(&workspace);
+        manager.update(&slot, |status| {
+            status.state = "error".into();
+            status.pid = Some(123456);
+            status.public_state = "ready".into();
+            status.public_endpoint = "https://old.example.invalid/mcp".into();
+            status.memory_bytes = 4096;
+            status.cpu_percent = 12.;
+            status.uptime_seconds = 42;
+            status.activity_state = "available".into();
+        });
+        assert!(manager.start(&workspace.id).is_err());
+        let status = manager.snapshot().statuses.remove(0);
+        assert_eq!(status.state, "error");
+        assert_eq!(
+            status.pid, None,
+            "a failed start exposed the old process PID"
+        );
+        assert_eq!(status.public_state, "disabled");
+        assert!(status.public_endpoint.is_empty());
+        assert_eq!(status.memory_bytes, 0);
+        assert_eq!(status.cpu_percent, 0.);
+        assert_eq!(status.uptime_seconds, 0);
+        assert_eq!(status.activity_state, "unknown");
+        assert!(slot.session.lock().unwrap().runtime.is_none());
+        manager.shutdown().unwrap();
     }
 
     #[test]

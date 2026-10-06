@@ -280,19 +280,22 @@ impl ManagedProcess {
                 .process(Pid::from_u32(*pid))
                 .is_some_and(|p| p.start_time() == *start)
         });
-        if self.supervised {
-            // The helper is only an owner. Report the core/tunnel process tree,
-            // including children, rather than the tiny wrapper's resource use.
-            self.descendants
-                .iter()
-                .filter_map(|(pid, _)| self.system.process(Pid::from_u32(*pid)))
-                .fold((0., 0u64), |(cpu, memory), p| {
-                    (cpu + p.cpu_usage(), memory.saturating_add(p.memory()))
-                })
+        // A supervisor contributes no application work, but direct launches
+        // (including Windows) must include both the core and its workers.
+        let own = if self.supervised {
+            (0., 0)
         } else {
-            let p = self.system.process(Pid::from_u32(self.pid()));
-            p.map(|p| (p.cpu_usage(), p.memory())).unwrap_or((0., 0))
-        }
+            self.system
+                .process(Pid::from_u32(self.pid()))
+                .map(|p| (p.cpu_usage(), p.memory()))
+                .unwrap_or((0., 0))
+        };
+        self.descendants
+            .iter()
+            .filter_map(|(pid, _)| self.system.process(Pid::from_u32(*pid)))
+            .fold(own, |(cpu, memory), p| {
+                (cpu + p.cpu_usage(), memory.saturating_add(p.memory()))
+            })
     }
     fn identity_matches(&self, pid: u32, start: u64) -> bool {
         self.system

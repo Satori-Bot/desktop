@@ -4,14 +4,31 @@ Reviewed on October 6, 2026. This is a dated evidence record for [Draft PR #1](h
 
 ## Automated coverage
 
-- **Rust manager:** 58 active tests on Unix: 11 unit/admission, 10 lifecycle, 22 persistence/install/tunnel, 7 ownership and 8 supervisor tests. The external-core acceptance entry, real managed-install acceptance and private subprocess fixture are intentionally ignored in the default invocation. Windows runs the platform-applicable subset.
-- **Frontend:** 55 rendered React/IPC tests, strict TypeScript, formatting and production Vite build. Tests cover interrupted forms, destructive-target confirmation, single-flight polling, stale results/copy cancellation, log rotation/truncation, OAuth reauthorization guidance and operation feedback. The core-version card explicitly labels the separate permission mode in both languages; it does not present “Safe” as a version-security assessment.
-- **Browser:** 18 Playwright flows, including light/dark and narrow layouts, onboarding, settings, connection/activity/diagnostics, tunnel failure, visible success/error feedback after scrolling long settings, and both Connections action rows staying above Authentication at desktop/narrow widths. Mocked IPC screenshots are visibly labeled and are not native service evidence.
+- **Rust manager:** 64 active tests on Unix: 12 unit/admission, 10 lifecycle, 22 persistence/install/tunnel, 7 ownership, 8 supervisor and 5 resource/probe/cleanup regressions. The external-core acceptance entry, real managed-install acceptance and private subprocess fixture are intentionally ignored in the default invocation. Windows runs the platform-applicable subset.
+- **Frontend:** 67 rendered React/IPC tests, strict TypeScript, formatting and production Vite build. Tests cover interrupted forms, destructive-target confirmation, single-flight polling, stale results/copy cancellation, log rotation/truncation, OAuth reauthorization guidance and operation feedback. The core-version card explicitly labels the separate permission mode in both languages; it does not present “Safe” as a version-security assessment.
+- **Browser:** 21 Playwright flows, including light/dark and narrow layouts, onboarding, settings, connection/activity/diagnostics, tunnel failure, visible success/error feedback after scrolling long settings, and both Connections action rows staying above Authentication at desktop/narrow widths. Mocked IPC screenshots are visibly labeled and are not native service evidence.
 - **Python boundary:** 6 compatibility-launcher/fixture tests, Ruff, wheel/source-distribution builds and Twine validation. Packaging retains `mcp_desktop_client` and `coding-tools-mcp-desktop`; no Python core or Qt management implementation is bundled.
 - **Native smoke harness:** local self-tests cover owned-process cleanup, private fixture handling and bounded diagnostic history. CI runs the actual Linux Tauri binary with WebKitGTK, not a mocked frontend or a development-server page.
 - **Dependencies:** Rust formatting/Clippy with warnings denied, Windows GNU cross-target Clippy, and the actual Linux Tauri CLI build pass locally on the supported Rust 1.88.0 minimum. The patched lock audit has zero vulnerability-class findings and seven visible upstream informational warnings. See [dependency review](DEPENDENCIES.md); this is not a claim of zero security risk.
 
 The render-heavy jsdom files are scheduled serially to avoid Windows CI CPU contention. The existing five-second per-test watchdog and all assertions remain enabled.
+
+## Recovery and accessibility refinement (October 6, 2026, evening)
+
+A further independent review found and corrected reproducible gaps, without changing the external Python core:
+
+- Core and tunnel startup transfer process ownership before readiness. A failed start explicitly verifies cleanup and retains its handle if cleanup is still pending. A dedicated negative-control fixture deliberately detaches a short-lived output-pipe holder, proves edits/deletion remain blocked, and proves a later Stop can recover. It does not claim containment of arbitrary detached descendants.
+- `cleanupPending` separately represents incomplete cleanup, so a dead PID is not presented as running and Stop remains available. Quit rechecks an unresolved Stop even after the owned handles are gone, and preserves an unrelated listener. Startup failure and crash refresh clear stale public readiness, resource values and uptime.
+- Direct/Windows resource totals include owned subprocesses. A real 48 MiB worker fixture previously reported only the parent's approximately 8.7 MiB; the corrected aggregation is covered on every platform.
+- Discovery and MCP initialize enforce a 1 MiB response bound before JSON deserialization, covering both declared lengths and streaming responses. All existing protocol and identity checks remain mandatory.
+- Interrupted historical calls are distinct from in-progress calls in English and Chinese. Pristine settings/runtime drafts follow saved changes while real edits survive polling; a successful settings save stays applied even when its follow-on status read fails.
+- Dismissed creation flows cannot launch follow-on work from a late result. Navigation, call-table cells, dialog close buttons and credential-reveal controls have localized semantics; reveal controls support pointer, Space, Enter and assistive-technology activation, with pressed state preserved.
+
+Local validation on the fresh cloud workspace passed Rust 1.88.0 formatting, Clippy with warnings denied, all **64 manager tests**, **67 frontend tests**, TypeScript, formatting and production build; **6 Python tests**, **10 native-harness self-tests**, Ruff, compatibility distributions and Twine. Focused regressions were first observed failing on the previous implementation. The independently reviewed undrained-pipe and unresolved-port fixtures pass with cleanup/retry verified.
+
+Both exact unchanged official-core acceptance fixtures passed again locally. The opt-in real managed installer also passed again: two independent published 0.5.0 environments, verified exact selections, rollback, genuine offline/no-cache failure preserving configuration, four real MCP cycles and full temporary/process cleanup. No live Cloudflare authorization or route was used.
+
+All **21 browser cases** are discovered; local Chromium still fails at its denied `socket()` call, and this workspace lacks native GTK/WebKit prerequisites. These local checks are not a native GUI or browser pass. The resulting commit must pass the hosted browser/native matrix and all four unsigned bundle jobs; the exact-head results are linked from [Draft PR #1](https://github.com/coding-tools-mcp/desktop/pull/1). Prior dated hosted runs below remain historical evidence only.
 
 ## Exact hosted evidence
 

@@ -78,6 +78,19 @@ pub fn start_supervised(
     state: &Path,
     supervisor: Option<&Path>,
 ) -> Result<(ManagedProcess, String)> {
+    let mut process = spawn_supervised(w, secrets, state, supervisor)?;
+    let url = wait_connected(&mut process, w, secrets, state)?;
+    Ok((process, url))
+}
+
+// Split spawning from readiness so the manager can persist ownership before
+// any wait/log read fails. Convenience start callers still own their process.
+pub(crate) fn spawn_supervised(
+    w: &Workspace,
+    secrets: &Secrets,
+    state: &Path,
+    supervisor: Option<&Path>,
+) -> Result<ManagedProcess> {
     let executable=find_program("cloudflared").context("cloudflared is missing. Install it from Cloudflare, then retry public access. Local MCP remains available.")?;
     let mut cmd = isolated_command(&executable, supervisor);
     cmd.arg("tunnel").arg("--no-autoupdate");
@@ -107,13 +120,23 @@ pub fn start_supervised(
     let log = state.join("tunnel.log");
     private_write(&log, b"")?;
     #[cfg(unix)]
-    let mut process = if supervisor.is_some() {
+    let process = if supervisor.is_some() {
         ManagedProcess::spawn_supervised(&mut cmd, log.clone(), secrets.clone())?
     } else {
         ManagedProcess::spawn(&mut cmd, log.clone(), secrets.clone())?
     };
     #[cfg(not(unix))]
-    let mut process = ManagedProcess::spawn(&mut cmd, log.clone(), secrets.clone())?;
+    let process = ManagedProcess::spawn(&mut cmd, log.clone(), secrets.clone())?;
+    Ok(process)
+}
+
+pub(crate) fn wait_connected(
+    process: &mut ManagedProcess,
+    w: &Workspace,
+    secrets: &Secrets,
+    state: &Path,
+) -> Result<String> {
+    let log = state.join("tunnel.log");
     let pattern = regex::Regex::new(r"https://[a-z0-9-]+\.trycloudflare\.com").unwrap();
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut public = w.public_url.clone();
@@ -131,11 +154,10 @@ pub fn start_supervised(
             // Preserve target birth identities before a ready helper is exposed
             // to the manager, including a helper failure before its next poll.
             process.metrics();
-            return Ok((process, public));
+            return Ok(public);
         }
         thread::sleep(Duration::from_millis(150));
     }
-    process.stop()?;
     bail!("Cloudflare did not establish a connection within 25 seconds. Local MCP remains available; retry public access.")
 }
 fn run(executable: &Path, args: &[String], home: &Path, seconds: u64) -> Result<String> {

@@ -139,6 +139,8 @@ pub struct Status {
     pub workspace_id: String,
     pub state: String,
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub cleanup_pending: bool,
     pub local_state: String,
     pub public_state: String,
     pub local_message: String,
@@ -159,6 +161,7 @@ impl Status {
             workspace_id: w.id.clone(),
             state: "stopped".into(),
             pid: None,
+            cleanup_pending: false,
             local_state: "stopped".into(),
             public_state: if w.access == "local" {
                 "disabled"

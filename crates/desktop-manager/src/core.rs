@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use std::{
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -140,6 +141,27 @@ pub fn client() -> Result<Client> {
         .no_proxy()
         .build()?)
 }
+// Discovery and initialize should be small control-plane responses. Bound both
+// declared and streamed bodies, including configured public endpoints, before
+// allocating/deserializing arbitrary server output.
+const PROBE_BODY_LIMIT: u64 = 1024 * 1024;
+fn probe_json(response: reqwest::blocking::Response) -> Result<Value> {
+    let response = response.error_for_status()?;
+    if response
+        .content_length()
+        .is_some_and(|size| size > PROBE_BODY_LIMIT)
+    {
+        bail!("MCP health response exceeds the 1 MiB maximum");
+    }
+    let mut bytes = Vec::new();
+    response
+        .take(PROBE_BODY_LIMIT + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > PROBE_BODY_LIMIT {
+        bail!("MCP health response exceeds the 1 MiB maximum");
+    }
+    serde_json::from_slice(&bytes).context("MCP health endpoint returned invalid JSON")
+}
 pub fn probe(w: &Workspace, secrets: &Secrets, public: bool) -> Result<String> {
     let base = if public {
         w.public_url.clone()
@@ -147,11 +169,7 @@ pub fn probe(w: &Workspace, secrets: &Secrets, public: bool) -> Result<String> {
         format!("http://127.0.0.1:{}", w.port)
     };
     let c = client()?;
-    let card: Value = c
-        .get(format!("{base}/.well-known/mcp.json"))
-        .send()?
-        .error_for_status()?
-        .json()?;
+    let card = probe_json(c.get(format!("{base}/.well-known/mcp.json")).send()?)?;
     if card.pointer("/server/name").and_then(Value::as_str) != Some("coding-tools-mcp")
         || card.pointer("/transport/endpoint").and_then(Value::as_str) != Some("/mcp")
     {
@@ -178,7 +196,7 @@ pub fn probe(w: &Workspace, secrets: &Secrets, public: bool) -> Result<String> {
             "Core {version} is reachable; OAuth authorization is required"
         ));
     }
-    let payload: Value = response.error_for_status()?.json()?;
+    let payload = probe_json(response)?;
     if payload
         .pointer("/result/serverInfo/name")
         .and_then(Value::as_str)
