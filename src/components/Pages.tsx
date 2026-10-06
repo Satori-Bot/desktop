@@ -837,7 +837,7 @@ export function SettingsPage({
   }
   async function install() {
     if (!/^\d+\.\d+(?:\.\d+)?(?:[a-zA-Z0-9.+-]*)$/.test(version)) {
-      setValidation(t("Enter an exact version, for example 0.1.0."));
+      setValidation(t("Enter an exact version, for example 0.5.0."));
       return;
     }
     setValidation("");
@@ -960,7 +960,7 @@ export function SettingsPage({
         <div className="core-install">
           <TextInput
             label={t("Version to install")}
-            placeholder="0.1.0"
+            placeholder="0.5.0"
             value={version}
             onChange={(event) => setVersion(event.currentTarget.value)}
             error={validation}

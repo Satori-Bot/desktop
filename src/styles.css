@@ -270,8 +270,8 @@ nav {
 }
 .operation-feedback {
   position: fixed;
-  top: max(16px, env(safe-area-inset-top));
-  right: max(16px, env(safe-area-inset-right));
+  top: max(16px, env(safe-area-inset-top, 0px));
+  right: max(16px, env(safe-area-inset-right, 0px));
   width: min(420px, calc(100vw - 32px));
   /* Above the app shell, below Mantine's modal layer (200). */
   z-index: 100;

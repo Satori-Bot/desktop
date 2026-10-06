@@ -277,8 +277,8 @@ const zh: Record<string, string> = {
   "Secrets stay in your local desktop configuration. Never paste them into issue reports.":
     "密钥保存在本机桌面配置中，请勿粘贴到问题报告。",
   "Install requires uv and network access.": "安装需要 uv 和网络访问。",
-  "Enter an exact version, for example 0.1.0.":
-    "请输入准确版本号，例如 0.1.0。",
+  "Enter an exact version, for example 0.5.0.":
+    "请输入准确版本号，例如 0.5.0。",
   "Created successfully. Start failed; your workspace is saved and can be retried.":
     "已创建并保存，但启动失败。你可以重试启动。",
 };

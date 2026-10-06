@@ -234,6 +234,20 @@ def remove_owned_temp(root: Path, timeout: float = 5) -> bool:
     return not root.exists()
 
 
+def retain_feedback(evidence: dict, stage: str, observed: list, elapsed: float) -> None:
+    """Retain distinct, bounded DOM observations instead of erasing expired feedback."""
+    evidence.setdefault("ui_feedback", {})[stage] = observed
+    history = evidence.setdefault("ui_feedback_history", {}).setdefault(stage, [])
+    if history and history[-1]["items"] == observed:
+        return
+    entry = {"elapsed_seconds": round(elapsed, 3), "items": observed}
+    if len(history) < 16:
+        history.append(entry)
+    else:
+        history[-1] = entry
+        evidence["ui_feedback_history_clipped"] = True
+
+
 def sha256(path: Path) -> str:
     result = hashlib.sha256()
     with path.open("rb") as stream:
@@ -329,6 +343,7 @@ def run(args) -> None:
     app = None
     endpoint_port = None
     record_feedback = None
+    session_started = time.monotonic()
     passed = False
     tracked_processes = {}
 
@@ -462,20 +477,48 @@ def run(args) -> None:
                     return Array.from(document.querySelectorAll('[role="status"], [role="alert"]'))
                       .slice(0, 8).map(el => {
                         const r = el.getBoundingClientRect();
+                        const style = getComputedStyle(el);
+                        const region = el.closest('.operation-feedback');
+                        const regionStyle = region ? getComputedStyle(region) : null;
+                        const regionRect = region ? region.getBoundingClientRect() : null;
                         return {role: el.getAttribute('role'), text: (el.textContent || '').slice(0, 1200),
+                          renderedText: (el.innerText || '').slice(0, 1200),
+                          rect: {x: r.x, y: r.y, width: r.width, height: r.height},
+                          display: style.display, visibility: style.visibility,
+                          regionTop: regionStyle ? regionStyle.top : null,
+                          regionRight: regionStyle ? regionStyle.right : null,
+                          regionPosition: regionStyle ? regionStyle.position : null,
+                          regionRect: regionRect ? {x: regionRect.x, y: regionRect.y,
+                            width: regionRect.width, height: regionRect.height} : null,
                           inViewport: r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0 &&
                             r.bottom <= innerHeight && r.right <= innerWidth};
                       });
                 """)
-                evidence.setdefault("ui_feedback", {})[stage] = [
-                    {**item, "text": redact_diagnostic(item["text"])}
+                safe_observed = [
+                    {
+                        **item,
+                        "text": redact_diagnostic(item["text"]),
+                        "renderedText": redact_diagnostic(item["renderedText"]),
+                    }
                     for item in observed
                 ]
+                retain_feedback(
+                    evidence, stage, safe_observed, time.monotonic() - session_started
+                )
                 return observed
 
             def visible_notice(text, stage):
+                captured = False
+
                 def found(browser):
-                    record_feedback(stage)
+                    nonlocal captured
+                    observed = record_feedback(stage)
+                    if not captured and any(
+                        item["role"] == "status" and text in item["text"]
+                        for item in observed
+                    ):
+                        capture(f"native-{stage}-first-notice")
+                        captured = True
                     for item in browser.find_elements(
                         By.CSS_SELECTOR, '[role="status"]'
                     ):
@@ -533,6 +576,10 @@ def run(args) -> None:
                 raise AssertionError(
                     "The native acceptance binary must embed its built frontend"
                 )
+            evidence["frontend_assets"] = driver.execute_script("""
+                return Array.from(document.scripts).filter(el => el.src).slice(0, 8)
+                  .map(el => new URL(el.src).pathname);
+            """)
             capture("native-onboarding")
             button("Create your first workspace").click()
             fill("Workspace name", WORKSPACE_NAME)
@@ -550,7 +597,15 @@ def run(args) -> None:
             )
             button("Settings").click()
             fill("Executable path", str(core))
-            button("Save runtime selection").click()
+            save_runtime = button("Save runtime selection")
+            record_feedback("save-runtime")
+            clicked_at = time.monotonic()
+            save_runtime.click()
+            evidence["save_runtime_click_seconds"] = round(
+                time.monotonic() - clicked_at, 3
+            )
+            record_feedback("save-runtime")
+            capture("native-runtime-after-click")
             visible_notice("Saved", "save-runtime")
             wait.until(
                 lambda browser: (
@@ -799,6 +854,21 @@ def run(args) -> None:
 
 
 class ProtocolHelpersTest(unittest.TestCase):
+    def test_feedback_history_keeps_transient_and_is_bounded(self):
+        evidence = {}
+        retain_feedback(evidence, "save", [], 0)
+        retain_feedback(evidence, "save", [{"text": "Saved"}], 1)
+        retain_feedback(evidence, "save", [{"text": "Saved"}], 2)
+        retain_feedback(evidence, "save", [], 8)
+        self.assertEqual(len(evidence["ui_feedback_history"]["save"]), 3)
+        self.assertEqual(
+            evidence["ui_feedback_history"]["save"][1]["items"], [{"text": "Saved"}]
+        )
+        for index in range(25):
+            retain_feedback(evidence, "save", [{"text": str(index)}], index + 10)
+        self.assertEqual(len(evidence["ui_feedback_history"]["save"]), 16)
+        self.assertTrue(evidence["ui_feedback_history_clipped"])
+
     def test_endpoint_scope(self):
         self.assertEqual(loopback_endpoint("http://127.0.0.1:28766/mcp")[1], 28766)
         for value in [

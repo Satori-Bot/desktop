@@ -344,6 +344,29 @@ for (const viewport of [
       path: `screenshots/fixture-settings-saved-${viewport.width}.png`,
       animations: "disabled",
     });
+    // Exercise the actual rule when a native webview omits safe-area variables.
+    // Unknown env() names reproduce that standards-defined fallback path.
+    const unavailableInsets = await page.evaluate(() => {
+      for (const sheet of document.styleSheets) {
+        for (const rule of sheet.cssRules) {
+          if (
+            rule instanceof CSSStyleRule &&
+            rule.selectorText === ".operation-feedback"
+          )
+            return rule.cssText
+              .replaceAll("safe-area-inset-top", "test-unavailable-inset-top")
+              .replaceAll(
+                "safe-area-inset-right",
+                "test-unavailable-inset-right",
+              );
+        }
+      }
+      throw new Error("Production operation-feedback rule was not loaded");
+    });
+    await page.addStyleTag({ content: unavailableInsets });
+    await expect(feedback).toHaveCSS("top", "16px");
+    await expect(feedback).toHaveCSS("right", "16px");
+    await expectFeedbackInViewport(page, success);
 
     await changeError(
       page,

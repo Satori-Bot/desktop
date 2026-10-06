@@ -110,6 +110,41 @@ describe("viewport-anchored operation feedback", () => {
     {
       language: "en" as const,
       settings: "Settings",
+      label: "Version to install",
+      install: "Install version",
+      example: "Enter an exact version, for example 0.5.0.",
+    },
+    {
+      language: "zh" as const,
+      settings: "设置",
+      label: "要安装的版本",
+      install: "安装版本",
+      example: "请输入准确版本号，例如 0.5.0。",
+    },
+  ])(
+    "uses the verified stable core example in $language without starting an install",
+    async ({ language, settings, label, install, example }) => {
+      snapshot.settings.language = language;
+      await mount();
+      await openSettings(settings);
+      expect(screen.getByLabelText(label)).toHaveAttribute(
+        "placeholder",
+        "0.5.0",
+      );
+      await act(async () =>
+        fireEvent.click(screen.getByRole("button", { name: install })),
+      );
+      expect(screen.getByText(example)).toBeVisible();
+      expect(
+        invoke.mock.calls.some(([command]) => command === "install_core"),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    {
+      language: "en" as const,
+      settings: "Settings",
       executable: "Executable path",
       save: "Save runtime selection",
       region: "Operation feedback",
