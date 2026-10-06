@@ -7,10 +7,11 @@ Prerequisites (installed by CI, not by this script):
   apt packages: webkit2gtk-driver xvfb dbus-x11 xclip and normal Tauri prerequisites
 
 Run after `npm run tauri build -- --debug --no-bundle -- --locked`:
-  dbus-run-session -- xvfb-run -a python tests/native_ui_smoke.py \
+  xvfb-run -a dbus-run-session -- python tests/native_ui_smoke.py \
     --binary target/debug/coding-tools-mcp-desktop-native \
     --core "$(command -v coding-tools-mcp)" --artifacts artifacts/native-ui
 
+Xvfb wraps dbus-run-session so activated GTK portal services inherit DISPLAY.
 All app mutations use visible controls and real Tauri IPC. No invoke mocks,
 production instrumentation, or sandbox-disabling flags are used. The folder
 path is typed: OS file-picker dialogs, tray menus, installers, and non-Linux
@@ -262,6 +263,7 @@ def run(args) -> None:
     from selenium.webdriver.common.options import ArgOptions
     from selenium.webdriver.common.proxy import Proxy, ProxyType
     from selenium.webdriver.remote.client_config import ClientConfig
+    from selenium.webdriver.remote.file_detector import UselessFileDetector
     from selenium.webdriver.support import expected_conditions as ec
     from selenium.webdriver.support.ui import WebDriverWait
     from urllib3.exceptions import HTTPError as TransportError
@@ -358,7 +360,12 @@ def run(args) -> None:
                 remote_server_addr=server, timeout=15, proxy=direct
             )
             driver = webdriver.Remote(
-                command_executor=server, options=options, client_config=client_config
+                command_executor=server,
+                options=options,
+                client_config=client_config,
+                # Tauri and the client share this host. Existing executable paths
+                # are text input, never Selenium Grid file-upload requests.
+                file_detector=UselessFileDetector(),
             )
             app = wait_until(
                 lambda: owned_app(process.pid, binary), 10, "the launched native PID"
@@ -403,6 +410,13 @@ def run(args) -> None:
                 )
 
             def capture(name):
+                # DOM readiness can precede WebKit's composited pixels. Wait for
+                # local fonts and two painted frames without changing the UI.
+                driver.execute_async_script("""
+                    const done = arguments[arguments.length - 1];
+                    const ready = document.fonts ? document.fonts.ready : Promise.resolve();
+                    ready.then(() => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(done, 100))));
+                """)
                 path = artifacts / f"{name}.png"
                 if not driver.save_screenshot(str(path)) or not path.is_file():
                     raise AssertionError(f"Native screenshot capture failed: {name}")
@@ -430,6 +444,9 @@ def run(args) -> None:
                 ec.invisibility_of_element_located((By.CSS_SELECTOR, '[role="dialog"]'))
             )
             text_present(WORKSPACE_NAME)
+            evidence["checks"].append(
+                "native onboarding created the synthetic local workspace"
+            )
             button("Settings").click()
             fill("Executable path", str(core))
             button("Save runtime selection").click()

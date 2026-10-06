@@ -53,7 +53,7 @@ jobs:
         env:
           CODING_TOOLS_MCP_TELEMETRY: 'off'
           DO_NOT_TRACK: '1'
-        run: dbus-run-session -- xvfb-run -a python tests/native_ui_smoke.py --binary "$PWD/target/debug/coding-tools-mcp-desktop-native" --core "$(command -v coding-tools-mcp)" --artifacts artifacts/native-ui
+        run: xvfb-run -a dbus-run-session -- python tests/native_ui_smoke.py --binary "$PWD/target/debug/coding-tools-mcp-desktop-native" --core "$(command -v coding-tools-mcp)" --artifacts artifacts/native-ui
       - uses: actions/upload-artifact@v6
         if: always() && runner.os == 'Linux'
         with:

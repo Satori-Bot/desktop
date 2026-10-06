@@ -59,7 +59,7 @@ for name in os.listdir('/proc/self/fd' if sys.platform == 'linux' else '/dev/fd'
 info = {'core': os.getpid(), 'child': child.pid, 'pipes': pipes,
         'cwd': os.getcwd(), 'args': [os.fsencode(x).hex() for x in sys.argv[1:]],
         'secret': os.environ.get('FIXTURE_SECRET'), 'removed': os.environ.get('HOME'),
-        'environment': sorted(os.environ), 'stdin_is_null': os.fstat(0).st_rdev == os.stat('/dev/null').st_rdev}
+        'environment': dict(os.environ) if os.environ.get('FIXTURE_CAPTURE_CLEARED_ENV') == '1' else sorted(os.environ), 'stdin_is_null': os.fstat(0).st_rdev == os.stat('/dev/null').st_rdev}
 (root / 'info.tmp').write_text(json.dumps(info))
 os.replace(root / 'info.tmp', root / 'info.json')
 while not (root / 'exit').exists(): time.sleep(0.02)
@@ -287,6 +287,58 @@ fn killed_supervisor_uses_live_desktops_observed_identity_fallback() {
 
 #[test]
 fn argv_environment_and_working_directory_survive_without_reconstruction() {
+    const CHILD_MARKER: &str = "DESKTOP_ENV_TEST_CANARY_NAME";
+    let Some(canary) = std::env::var_os(CHILD_MARKER) else {
+        // Isolate deliberately poisoned ambient state in another process.
+        // Mutating this parallel test runner's environment would race peers.
+        let mut fixture = Fixture::new();
+        let canary = format!("DESKTOP_AMBIENT_CANARY_{}", uuid::Uuid::new_v4().simple());
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "argv_environment_and_working_directory_survive_without_reconstruction",
+                "--nocapture",
+            ])
+            .env(CHILD_MARKER, &canary)
+            .env(&canary, "deliberately inherited test value")
+            .env("HOME", fixture.dir.path().join("ambient-home"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        fixture.desktop = Some(child);
+        poll(
+            || {
+                fixture
+                    .desktop
+                    .as_mut()
+                    .unwrap()
+                    .try_wait()
+                    .unwrap()
+                    .is_some()
+            },
+            Duration::from_secs(60),
+            "isolated environment-preservation test did not finish",
+        );
+        let output = fixture.desktop.take().unwrap().wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "isolated environment-preservation test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    };
+    assert!(
+        std::env::var_os(&canary).is_some(),
+        "ambient canary must really exist before env_clear"
+    );
+    assert!(
+        std::env::var_os("HOME").is_some(),
+        "ambient HOME must really exist before env_clear"
+    );
+
     let mut fixture = Fixture::new();
     let value = std::ffi::OsString::from_vec(b"spaces ; quotes ' $HOME \xff".to_vec());
     let expected = value
@@ -298,12 +350,52 @@ fn argv_environment_and_working_directory_survive_without_reconstruction() {
             text
         });
     let dir = fixture.dir.path().to_path_buf();
+
+    // The old CI failure did not reveal its extra key. Instead of guessing an
+    // allowlist, measure the exact same helper/interpreter initialization under
+    // raw std::Command env_clear, bypassing the managed command/spawn adapters.
+    // Keep identical argv, imports, requested environment and working directory.
+    let mut raw = Command::new(supervisor());
+    raw.args([desktop_manager::supervisor::ARGUMENT, "--"])
+        .arg(python())
+        .args(["-c", CORE])
+        .arg(&value)
+        .current_dir(&dir)
+        .env_clear()
+        .env("FIXTURE_DIR", &dir)
+        .env("FIXTURE_SECRET", "private test value")
+        .env("FIXTURE_CAPTURE_CLEARED_ENV", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let child = raw.spawn().unwrap();
+    fixture.identities.push(Identity::capture(child.id()));
+    fixture.desktop = Some(child);
+    let baseline = fixture.capture_core();
+    // The stdin writer stays alive until the actual baseline target has reported.
+    drop(fixture.desktop.as_mut().unwrap().stdin.take());
+    let mut status = None;
+    poll(
+        || {
+            status = fixture.desktop.as_mut().unwrap().try_wait().unwrap();
+            status.is_some()
+        },
+        Duration::from_secs(10),
+        "raw environment baseline did not clean up",
+    );
+    assert!(status.unwrap().success());
+    fixture.assert_stopped();
+    fixture.desktop.take();
+    for marker in ["info.json", "child.ready"] {
+        fs::remove_file(dir.join(marker)).unwrap();
+    }
+
     let data = fixture.start(|cmd| {
         cmd.env_clear()
             .env("FIXTURE_DIR", &dir)
             .env("FIXTURE_SECRET", "private test value")
+            .env("FIXTURE_CAPTURE_CLEARED_ENV", "1")
             .arg(value);
-        // Python may set LC_CTYPE while initializing; it is not supplied by us.
     });
     assert_eq!(
         data["cwd"],
@@ -319,10 +411,41 @@ fn argv_environment_and_working_directory_survive_without_reconstruction() {
     assert_eq!(data["secret"], "private test value");
     assert!(data["removed"].is_null());
     assert_eq!(data["stdin_is_null"], true);
-    let environment = data["environment"].as_array().unwrap();
-    assert!(environment.iter().all(
-        |name| ["FIXTURE_DIR", "FIXTURE_SECRET", "LC_CTYPE"].contains(&name.as_str().unwrap())
-    ));
+
+    let baseline_environment = baseline["environment"].as_object().unwrap();
+    let environment = data["environment"].as_object().unwrap();
+    for (label, observed) in [
+        ("raw baseline", baseline_environment),
+        ("managed", environment),
+    ] {
+        for key in ["HOME", CHILD_MARKER, canary.to_str().unwrap()] {
+            assert!(
+                !observed.contains_key(key),
+                "{label} inherited cleared ambient key: {key}"
+            );
+        }
+        assert!(
+            observed["FIXTURE_DIR"] == dir.to_string_lossy().as_ref(),
+            "{label} changed explicitly requested FIXTURE_DIR"
+        );
+        assert!(
+            observed["FIXTURE_SECRET"] == "private test value",
+            "{label} changed explicitly requested FIXTURE_SECRET"
+        );
+        assert!(
+            observed["FIXTURE_CAPTURE_CLEARED_ENV"] == "1",
+            "{label} changed explicitly requested fixture capture flag"
+        );
+    }
+    let differing_keys: std::collections::BTreeSet<_> = baseline_environment
+        .keys()
+        .chain(environment.keys())
+        .filter(|key| baseline_environment.get(*key) != environment.get(*key))
+        .collect();
+    // Values are compared in memory but never included in failure diagnostics.
+    assert!(differing_keys.is_empty(),
+        "Environment differs from raw cleared baseline; differing key names: {differing_keys:?}; baseline key names: {:?}; managed key names: {:?}",
+        baseline_environment.keys().collect::<Vec<_>>(), environment.keys().collect::<Vec<_>>());
     fixture.process.as_mut().unwrap().stop().unwrap();
     fixture.assert_stopped();
 }

@@ -32,7 +32,7 @@ A Cloudflare account certificate from browser login can manage that account's tu
 
 ## Development
 
-Requirements: Node.js 22.12+ (or supported newer LTS), Rust 1.85.1+, Python 3.11+ for the compatibility launcher/tests, and [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). The lockfile pins versions compatible with Rust 1.85.
+Requirements: Node.js 22.12+ (or supported newer LTS), Rust 1.88.0+, Python 3.11+ for the compatibility launcher/tests, and [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). The lockfile pins versions compatible with Rust 1.88.
 
 ```sh
 npm ci
@@ -93,7 +93,7 @@ Closing the window hides it in the tray by default. **Stop services and quit** s
 
 Runtime/tunnel logs rotate at 1 MiB with one backup and are read with bounded cursors. Core history keeps the current and three previous launches, each using the core's bounded four-file journal. Diagnostics export excludes raw logs, paths, addresses, credentials, commands, tool inputs and outputs.
 
-See [IPC contract](docs/IPC.md), [design and references](docs/ARCHITECTURE.md), and [verification](docs/VERIFICATION.md).
+See [IPC contract](docs/IPC.md), [design and references](docs/ARCHITECTURE.md), [verification](docs/VERIFICATION.md), and [dependency review](docs/DEPENDENCIES.md).
 
 ## License
 
