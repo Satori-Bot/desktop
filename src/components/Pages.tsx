@@ -152,7 +152,7 @@ export function ConnectionsPage({
         </Text>
       )}
       <div className="endpoint-grid">
-        <div>
+        <div className="connection-endpoint">
           <EndpointCard
             status={status}
             access={workspace.access}
@@ -161,7 +161,7 @@ export function ConnectionsPage({
             onCopy={onCopy}
             busy={!!busy}
           />
-          <Group mt="sm">
+          <Group mt="sm" className="connection-config-actions">
             <Button
               size="xs"
               variant="default"
@@ -181,7 +181,7 @@ export function ConnectionsPage({
             </Button>
           </Group>
         </div>
-        <div>
+        <div className="connection-endpoint">
           <EndpointCard
             status={status}
             access={workspace.access}
@@ -190,7 +190,7 @@ export function ConnectionsPage({
             onCopy={onCopy}
             busy={!!busy}
           />
-          <Group mt="sm">
+          <Group mt="sm" className="connection-config-actions">
             <Button
               size="xs"
               variant="default"
@@ -236,7 +236,7 @@ export function ConnectionsPage({
           )}
         </Alert>
       )}
-      <Paper withBorder p="lg">
+      <Paper withBorder p="lg" className="connection-authentication">
         <Group justify="space-between">
           <Group>
             <div className="panel-icon">

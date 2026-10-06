@@ -306,10 +306,179 @@ async function expectFeedbackInViewport(page: Page, alert: Locator) {
   expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height);
 }
 
+async function expectConnectionActionsContained(page: Page) {
+  // Read all boxes together so scrolling cannot invalidate a preceding box.
+  const geometry = await page.locator(".endpoint-grid").evaluate((grid) => {
+    const box = (element: Element) => {
+      const { x, y, width, height } = element.getBoundingClientRect();
+      return { x, y, width, height };
+    };
+    const authentication = document.querySelector(".connection-authentication");
+    if (!authentication) throw new Error("Authentication panel is missing");
+    return {
+      grid: box(grid),
+      authentication: box(authentication),
+      endpoints: Array.from(grid.children).map((endpoint) => {
+        const card = endpoint.querySelector(".endpoint-card");
+        const actions = endpoint.querySelector(".connection-config-actions");
+        if (!card || !actions) throw new Error("Endpoint layout is incomplete");
+        return {
+          column: box(endpoint),
+          card: box(card),
+          actions: box(actions),
+          buttons: Array.from(actions.querySelectorAll("button")).map(box),
+        };
+      }),
+    };
+  });
+  const contains = (
+    outer: typeof geometry.grid,
+    inner: typeof geometry.grid,
+  ) => {
+    expect(inner.width).toBeGreaterThan(0);
+    expect(inner.height).toBeGreaterThan(0);
+    expect(inner.x).toBeGreaterThanOrEqual(outer.x - 1);
+    expect(inner.y).toBeGreaterThanOrEqual(outer.y - 1);
+    expect(inner.x + inner.width).toBeLessThanOrEqual(
+      outer.x + outer.width + 1,
+    );
+    expect(inner.y + inner.height).toBeLessThanOrEqual(
+      outer.y + outer.height + 1,
+    );
+  };
+  expect(geometry.endpoints).toHaveLength(2);
+  for (const endpoint of geometry.endpoints) {
+    contains(geometry.grid, endpoint.column);
+    contains(endpoint.column, endpoint.card);
+    contains(endpoint.column, endpoint.actions);
+    expect(endpoint.actions.y).toBeGreaterThanOrEqual(
+      endpoint.card.y + endpoint.card.height,
+    );
+    for (const button of endpoint.buttons) {
+      contains(endpoint.actions, button);
+      contains(endpoint.column, button);
+      contains(geometry.grid, button);
+      expect(button.y + button.height).toBeLessThan(geometry.authentication.y);
+    }
+  }
+  expect(geometry.grid.y + geometry.grid.height).toBeLessThan(
+    geometry.authentication.y,
+  );
+  const [local, publicEndpoint] = geometry.endpoints;
+  if (page.viewportSize()!.width < 800) {
+    expect(local.column.y + local.column.height).toBeLessThan(
+      publicEndpoint.column.y,
+    );
+    if (publicEndpoint.buttons.length === 3)
+      expect(publicEndpoint.buttons[2].y).toBeGreaterThan(
+        publicEndpoint.buttons[0].y,
+      );
+  }
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    ),
+  ).toBe(true);
+}
+
 for (const viewport of [
   { width: 1280, height: 720 },
   { width: 390, height: 844 },
 ]) {
+  for (const tunnelFailure of [false, true]) {
+    const state = tunnelFailure ? "public-error" : "local-only";
+    test(`Connections actions stay inside their grid above Authentication: ${state} at ${viewport.width}px`, async ({
+      page,
+    }) => {
+      await page.setViewportSize(viewport);
+      await mockDesktop(page, { tunnelFailure });
+      await openDesktop(page);
+      if (viewport.width < 800)
+        await page.getByRole("button", { name: "Open navigation" }).click();
+      await nav(page, "Connections").click();
+      await page.evaluate(() => document.fonts.ready);
+      const endpoints = page.locator(".connection-endpoint");
+      const local = endpoints.nth(0);
+      const publicEndpoint = endpoints.nth(1);
+      await expect(local.getByText("Online", { exact: true })).toBeVisible();
+      await expect(
+        publicEndpoint.getByText(tunnelFailure ? "Error" : "Not configured", {
+          exact: true,
+        }),
+      ).toBeVisible();
+      await expect(
+        publicEndpoint.locator(".connection-config-actions button"),
+      ).toHaveCount(tunnelFailure ? 3 : 2);
+      if (tunnelFailure)
+        await expect(
+          publicEndpoint.getByText(
+            "Test fixture: Cloudflare tunnel authentication failed.",
+          ),
+        ).toBeVisible();
+      await expectConnectionActionsContained(page);
+      await expect(page.locator("#test-fixture-label")).toBeVisible();
+      await screenshot(
+        page,
+        `connections-${state}-${viewport.width}-test-fixture`,
+      );
+
+      // Both disabled public actions and live local/retry controls must remain
+      // fully scrollable into view; trial clicks also detect obstructed targets.
+      for (const button of await page
+        .locator(".connection-config-actions button")
+        .all()) {
+        await button.scrollIntoViewIfNeeded();
+        await expect(button).toBeInViewport({ ratio: 1 });
+        if (await button.isEnabled()) await button.click({ trial: true });
+      }
+      await expect(
+        publicEndpoint.getByRole("button", {
+          name: "Copy config",
+          exact: true,
+        }),
+      ).toBeDisabled();
+      await expect(
+        publicEndpoint.getByRole("button", { name: "View configuration" }),
+      ).toBeDisabled();
+      await local
+        .getByRole("button", { name: "Copy config", exact: true })
+        .click();
+      const feedback = page.getByRole("region", { name: "Operation feedback" });
+      await expect(feedback.getByRole("status")).toHaveText("Copied");
+      await expectFeedbackInViewport(page, feedback.getByRole("status"));
+      await expectConnectionActionsContained(page);
+      await page.screenshot({
+        path: `screenshots/connections-${state}-copied-${viewport.width}-test-fixture.png`,
+        animations: "disabled",
+      });
+      await feedback
+        .getByRole("button", { name: "Dismiss notification" })
+        .click();
+      await local.getByRole("button", { name: "View configuration" }).click();
+      const dialog = page.getByRole("dialog", {
+        name: "Configure your client",
+      });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.locator(".config-code")).toContainText(
+        "http://127.0.0.1:8765/mcp",
+      );
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      await expectConnectionActionsContained(page);
+      expect(await ipcCalls(page, "connection_config")).toEqual([
+        {
+          command: "connection_config",
+          args: { id: "test-workspace", public: false },
+        },
+        {
+          command: "connection_config",
+          args: { id: "test-workspace", public: false },
+        },
+      ]);
+      expect(await ipcCalls(page, "save_workspace")).toHaveLength(0);
+    });
+  }
+
   test(`runtime save feedback stays in the scrolled Settings viewport at ${viewport.width}px`, async ({
     page,
   }) => {

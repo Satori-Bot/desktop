@@ -703,6 +703,31 @@ def run(args) -> None:
             capture("native-running")
 
             button("Connections").click()
+            text_present("Access and authentication")
+
+            def connection_actions_fit(browser):
+                layout = browser.execute_script("""
+                    const grid = document.querySelector('.endpoint-grid');
+                    if (!grid || !grid.nextElementSibling) return null;
+                    const bounds = grid.getBoundingClientRect();
+                    const following = grid.nextElementSibling.getBoundingClientRect();
+                    const actions = Array.from(grid.children).map(column => {
+                      const r = column.lastElementChild.getBoundingClientRect();
+                      return {left: r.left, right: r.right, top: r.top, bottom: r.bottom};
+                    });
+                    return {gridBottom: bounds.bottom, followingTop: following.top, actions,
+                      contained: actions.length === 2 && actions.every(r =>
+                        r.left >= bounds.left - 1 && r.right <= bounds.right + 1 &&
+                        r.top >= bounds.top - 1 && r.bottom <= bounds.bottom + 1),
+                      separated: actions.every(r => r.bottom <= following.top)};
+                """)
+                evidence["connections_layout"] = layout
+                return layout and layout["contained"] and layout["separated"]
+
+            wait.until(
+                connection_actions_fit,
+                message="Connection actions must stay inside the endpoint grid without overlapping the following panel",
+            )
             local_copy = wait.until(
                 ec.element_to_be_clickable(
                     (

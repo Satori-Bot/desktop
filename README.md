@@ -60,6 +60,8 @@ python -m unittest discover -s tests -p 'test_*.py'
 make check
 ```
 
+The native review-bundle matrix covers Linux x86_64, macOS Apple Silicon (aarch64), macOS Intel (x86_64), and Windows x64. Check the current PR results before using its artifacts. These are separate architecture-specific packages, not a universal macOS binary. No Windows ARM or Linux ARM installer validation is claimed.
+
 The browser-only development preview explicitly has **no native backend**. It never presents sample data as live service status.
 
 ### Real external-core acceptance

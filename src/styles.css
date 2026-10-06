@@ -383,6 +383,19 @@ h2.mantine-Title-root {
   position: relative;
   overflow: hidden;
 }
+.connection-endpoint {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.connection-endpoint > .endpoint-card {
+  /* Reserve space for the sibling actions inside the grid row. */
+  height: auto;
+  flex: 1;
+}
+.connection-config-actions {
+  flex-shrink: 0;
+}
 .endpoint-icon {
   width: 37px;
   height: 37px;
