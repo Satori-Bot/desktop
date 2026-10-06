@@ -92,6 +92,11 @@ fn local_listener(port: u16) -> std::io::Result<TcpListener> {
             }));
         }
         socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
+        // Windows can overlap IPv4 and an earlier non-exclusive dual-stack
+        // listener. Hold only a bind while checking IPv6; listening earlier
+        // could steal traffic. Never signal or adopt a socket-table owner.
+        let reserved_port = socket.local_addr()?.as_socket().unwrap().port();
+        crate::windows_ports::ensure_no_ipv6_listener(reserved_port)?;
         socket.listen(1)?;
         Ok(socket.into())
     }
@@ -398,7 +403,7 @@ impl Manager {
             {
                 bail!("OAuth credentials are missing; repair the workspace configuration");
             }
-            let port=local_listener(w.port).context("Port is already in use. Stop its owner or choose another port; no unrelated process was terminated.")?;
+            let port=local_listener(w.port).context("Port is already in use or availability could not be confirmed. Stop its owner or choose another port; no unrelated process was terminated.")?;
             drop(port);
             let state = self.storage.state_dir(id)?;
             events::begin_run(&state)?;
