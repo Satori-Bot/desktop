@@ -268,6 +268,22 @@ nav {
   padding: 34px 36px 45px;
   flex: 1;
 }
+.operation-feedback {
+  position: fixed;
+  top: max(16px, env(safe-area-inset-top));
+  right: max(16px, env(safe-area-inset-right));
+  width: min(420px, calc(100vw - 32px));
+  /* Above the app shell, below Mantine's modal layer (200). */
+  z-index: 100;
+  pointer-events: none;
+}
+.operation-alert {
+  pointer-events: auto;
+  max-height: min(240px, calc(100vh - 32px));
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  box-shadow: 0 6px 24px #0002;
+}
 .workspace-heading {
   display: flex;
   justify-content: space-between;

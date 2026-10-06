@@ -78,8 +78,10 @@ export default function App() {
   const [selected, setSelected] = useState("");
   const [page, setPage] = useState<Page>("Dashboard");
   const [loadError, setLoadError] = useState("");
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  const [feedback, setFeedback] = useState<{
+    kind: "success" | "error";
+    message: string;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const lock = useRef(false);
@@ -150,10 +152,10 @@ export default function App() {
       snapshot?.settings.language === "zh" ? "zh-CN" : "en";
   }, [snapshot?.settings.language]);
   useEffect(() => {
-    if (!notice) return;
-    const timer = setTimeout(() => setNotice(""), 6500);
+    if (feedback?.kind !== "success") return;
+    const timer = setTimeout(() => setFeedback(null), 6500);
     return () => clearTimeout(timer);
-  }, [notice]);
+  }, [feedback]);
   useEffect(() => {
     let cancelled = false;
     let activityPending = false;
@@ -186,16 +188,18 @@ export default function App() {
     if (lock.current) return;
     lock.current = true;
     setBusy(key);
-    setError("");
+    setFeedback(null);
     try {
       const result = await fn();
       if (mounted.current) {
-        if (success) setNotice(success);
         await refresh(true);
+        if (mounted.current && success)
+          setFeedback({ kind: "success", message: success });
       }
       return result;
     } catch (e) {
-      if (mounted.current) setError(errorText(e));
+      if (mounted.current)
+        setFeedback({ kind: "error", message: errorText(e) });
       return undefined;
     } finally {
       lock.current = false;
@@ -203,17 +207,21 @@ export default function App() {
     }
   };
   async function copy(value: string) {
+    setFeedback(null);
     try {
       await navigator.clipboard.writeText(value);
-      setNotice(t("Copied"));
+      setFeedback({ kind: "success", message: t("Copied") });
     } catch (e) {
-      setError(`${t("Copy failed")}: ${errorText(e)}`);
+      setFeedback({
+        kind: "error",
+        message: `${t("Copy failed")}: ${errorText(e)}`,
+      });
     }
   }
   function navigate(next: Page) {
     setPage(next);
     setMenuOpen(false);
-    setError("");
+    setFeedback(null);
   }
   function saved(next: Workspace, navigate = true) {
     ++request.current;
@@ -235,15 +243,19 @@ export default function App() {
     void refresh(true);
   };
   async function confirmed() {
+    setFeedback(null);
     if (confirm?.kind === "delete") {
       const target = snapshot?.workspaces.find(
         (item) => item.id === confirm.id,
       );
       if (!target) {
         setConfirm(null);
-        setError(
-          t("That workspace is no longer available. Nothing was removed."),
-        );
+        setFeedback({
+          kind: "error",
+          message: t(
+            "That workspace is no longer available. Nothing was removed.",
+          ),
+        });
         return;
       }
       if (
@@ -252,7 +264,10 @@ export default function App() {
         )
       ) {
         setConfirm(null);
-        setError(t("Stop this workspace before removing it."));
+        setFeedback({
+          kind: "error",
+          message: t("Stop this workspace before removing it."),
+        });
         return;
       }
       const result = await run(
@@ -441,31 +456,6 @@ export default function App() {
               >
                 {t("Retry")}
               </Button>
-            </Alert>
-          )}
-          {error && (
-            <Alert
-              mb="lg"
-              color="red"
-              icon={<CircleAlert size={17} />}
-              withCloseButton
-              onClose={() => setError("")}
-              role="alert"
-            >
-              {error}
-            </Alert>
-          )}
-          {notice && (
-            <Alert
-              className="notice"
-              mb="lg"
-              color="teal"
-              icon={<Check size={17} />}
-              withCloseButton
-              onClose={() => setNotice("")}
-              role="status"
-            >
-              {notice}
             </Alert>
           )}
           {snapshot?.migrationNotice && (
@@ -848,6 +838,33 @@ export default function App() {
           </span>
         </footer>
       </div>
+      {feedback && (
+        <div
+          className="operation-feedback"
+          role="region"
+          aria-label={t("Operation feedback")}
+        >
+          <Alert
+            className="operation-alert"
+            color={feedback.kind === "error" ? "red" : "teal"}
+            variant="filled"
+            icon={
+              feedback.kind === "error" ? (
+                <CircleAlert size={17} />
+              ) : (
+                <Check size={17} />
+              )
+            }
+            withCloseButton
+            closeButtonLabel={t("Dismiss notification")}
+            onClose={() => setFeedback(null)}
+            role={feedback.kind === "error" ? "alert" : "status"}
+            aria-atomic="true"
+          >
+            {feedback.message}
+          </Alert>
+        </div>
+      )}
       {workspaceModal !== undefined && (
         <WorkspaceModal
           workspace={workspaceModal}

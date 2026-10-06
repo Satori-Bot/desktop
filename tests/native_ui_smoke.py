@@ -164,35 +164,74 @@ def process_record(pid: int):
         return None
 
 
-def owned_app(driver_pid: int, binary: Path):
+def descendant_records(*root_pids: int) -> list[dict]:
+    """Read identities only; callers retain descendants before they can be reparented."""
     records = {}
     for entry in Path("/proc").iterdir():
         if entry.name.isdigit():
             record = process_record(int(entry.name))
             if record:
                 records[record["pid"]] = record
-    queue = [driver_pid]
+    queue = list(root_pids)
     visited = set()
+    descendants = []
     while queue:
         parent = queue.pop(0)
         if parent in visited:
             continue
         visited.add(parent)
         for record in records.values():
-            if record["parent"] != parent:
-                continue
-            try:
-                if Path(f"/proc/{record['pid']}/exe").resolve() == binary.resolve():
-                    return record  # Breadth-first chooses the GUI before its supervisor children.
-            except OSError:
-                pass
-            queue.append(record["pid"])
+            if record["parent"] == parent:
+                descendants.append(record)
+                queue.append(record["pid"])
+    return descendants
+
+
+def owned_app(driver_pid: int, binary: Path):
+    for record in descendant_records(driver_pid):
+        try:
+            if Path(f"/proc/{record['pid']}/exe").resolve() == binary.resolve():
+                return (
+                    record  # Breadth-first chooses the GUI before supervisor children.
+                )
+        except OSError:
+            continue
     return None
 
 
 def exited(record: dict) -> bool:
     current = process_record(record["pid"])
     return not current or current["birth"] != record["birth"] or current["state"] == "Z"
+
+
+def cleanup_owned_processes(records: list[dict]) -> bool:
+    """Only signal previously observed descendants whose birth identity still matches."""
+    for timeout, action in [(1.0, None), (3.0, signal.SIGTERM), (3.0, signal.SIGKILL)]:
+        if action is not None:
+            for record in records:
+                if not exited(record):
+                    with suppress(ProcessLookupError):
+                        os.kill(record["pid"], action)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if all(exited(record) for record in records):
+                return True
+            time.sleep(0.1)
+    return all(exited(record) for record in records)
+
+
+def remove_owned_temp(root: Path, timeout: float = 5) -> bool:
+    """Retry a late native cache write without replacing the primary test failure."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            shutil.rmtree(root)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            time.sleep(0.1)
+    return not root.exists()
 
 
 def sha256(path: Path) -> str:
@@ -289,8 +328,26 @@ def run(args) -> None:
     process = None
     app = None
     endpoint_port = None
+    record_feedback = None
     passed = False
-    with tempfile.TemporaryDirectory(prefix="desktop-native-ui-") as temporary:
+    tracked_processes = {}
+
+    def track_owned_processes():
+        roots = []
+        if process is not None and process.poll() is None:
+            roots.append(process.pid)
+        if app is not None and not exited(app):
+            roots.append(app["pid"])
+        for record in descendant_records(*roots):
+            tracked_processes[(record["pid"], record["birth"])] = record
+        if app is not None:
+            tracked_processes[(app["pid"], app["birth"])] = app
+
+    # Cleanup errors are recorded and fail an otherwise successful smoke below.
+    # The context manager must never mask an existing UI/protocol failure.
+    with tempfile.TemporaryDirectory(
+        prefix="desktop-native-ui-", ignore_cleanup_errors=True
+    ) as temporary:
         root = Path(temporary)
         home, workspace = root / "home", root / "workspace"
         home.mkdir(mode=0o700)
@@ -389,7 +446,7 @@ def run(args) -> None:
                     )
                 )
 
-            def fill(label, value):
+            def input_for_label(label):
                 item = wait.until(
                     ec.presence_of_element_located(
                         (
@@ -398,7 +455,50 @@ def run(args) -> None:
                         )
                     )
                 )
-                control = driver.find_element(By.ID, item.get_attribute("for"))
+                return driver.find_element(By.ID, item.get_attribute("for"))
+
+            def record_feedback(stage):
+                observed = driver.execute_script("""
+                    return Array.from(document.querySelectorAll('[role="status"], [role="alert"]'))
+                      .slice(0, 8).map(el => {
+                        const r = el.getBoundingClientRect();
+                        return {role: el.getAttribute('role'), text: (el.textContent || '').slice(0, 1200),
+                          inViewport: r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0 &&
+                            r.bottom <= innerHeight && r.right <= innerWidth};
+                      });
+                """)
+                evidence.setdefault("ui_feedback", {})[stage] = [
+                    {**item, "text": redact_diagnostic(item["text"])}
+                    for item in observed
+                ]
+                return observed
+
+            def visible_notice(text, stage):
+                def found(browser):
+                    record_feedback(stage)
+                    for item in browser.find_elements(
+                        By.CSS_SELECTOR, '[role="status"]'
+                    ):
+                        if not item.is_displayed() or text not in item.text:
+                            continue
+                        if browser.execute_script(
+                            """
+                            const r = arguments[0].getBoundingClientRect();
+                            return r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0 &&
+                              r.bottom <= innerHeight && r.right <= innerWidth;
+                        """,
+                            item,
+                        ):
+                            return True
+                    return False
+
+                return wait.until(
+                    found,
+                    message=f"Expected viewport-visible {text} feedback for {stage}",
+                )
+
+            def fill(label, value):
+                control = input_for_label(label)
                 control.clear()
                 control.send_keys(value)
 
@@ -410,6 +510,7 @@ def run(args) -> None:
                 )
 
             def capture(name):
+                track_owned_processes()
                 # DOM readiness can precede WebKit's composited pixels. Wait for
                 # local fonts and two painted frames without changing the UI.
                 driver.execute_async_script("""
@@ -450,7 +551,28 @@ def run(args) -> None:
             button("Settings").click()
             fill("Executable path", str(core))
             button("Save runtime selection").click()
-            text_present("Saved")
+            visible_notice("Saved", "save-runtime")
+            wait.until(
+                lambda browser: (
+                    input_for_label("Executable path").is_enabled()
+                    and not browser.find_element(
+                        By.XPATH,
+                        "//button[normalize-space(.)='Save runtime selection']",
+                    ).is_enabled()
+                )
+            )
+            capture("native-runtime-saved")
+            button("Dashboard").click()
+            button("Settings").click()
+            wait.until(
+                lambda _browser: (
+                    input_for_label("Executable path").get_attribute("value")
+                    == str(core)
+                )
+            )
+            evidence["checks"].append(
+                "runtime selection persisted across UI navigation with viewport-visible Saved feedback"
+            )
             button("Dashboard").click()
             button("Start workspace").click()
             button("Stop workspace")
@@ -481,7 +603,7 @@ def run(args) -> None:
             local_copy.click()
             # Read only after this test's explicit copy succeeds, inside its private Xvfb display.
             # No clipboard stubs, browser permission grants, or direct clipboard writes are used.
-            text_present("Copied")
+            visible_notice("Copied", "copy-config")
             copied = subprocess.run(
                 [clipboard_reader, "-o", "-selection", "clipboard"],
                 check=True,
@@ -587,6 +709,7 @@ def run(args) -> None:
             checkbox_label.click()
             checkbox = driver.find_element(By.ID, checkbox_label.get_attribute("for"))
             assert checkbox.is_selected()
+            track_owned_processes()
             try:
                 button("Quit").click()
             except WebDriverException:
@@ -605,12 +728,16 @@ def run(args) -> None:
                 :8000
             ]
             if driver is not None:
+                if record_feedback is not None:
+                    with suppress(WebDriverException, OSError, TransportError):
+                        record_feedback("failure")
                 with suppress(WebDriverException, OSError, TransportError):
                     driver.save_screenshot(str(artifacts / "native-failure.png"))
             raise
         finally:
             # Leave enough time for bounded cleanup after the overall alarm fires.
             signal.alarm(45)
+            track_owned_processes()
             if driver is not None:
                 with suppress(WebDriverException, OSError, TransportError):
                     driver.quit()
@@ -632,18 +759,33 @@ def run(args) -> None:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
+            evidence["cleanup_processes_exited"] = cleanup_owned_processes(
+                list(tracked_processes.values())
+            )
             log.close()
             save_driver_tail(raw_log, artifacts / "tauri-driver.log")
             evidence["cleanup_port_closed"] = endpoint_port is None or port_closed(
                 endpoint_port
             )
+            evidence["cleanup_temp_removed"] = remove_owned_temp(root)
+            cleanup_ok = all(
+                evidence[key]
+                for key in [
+                    "cleanup_processes_exited",
+                    "cleanup_port_closed",
+                    "cleanup_temp_removed",
+                ]
+            )
+            if passed and not cleanup_ok:
+                evidence["status"] = "failed"
+                evidence["failure"] = (
+                    "Test-owned native processes, MCP port, or temporary profile did not cleanly shut down"
+                )
             (artifacts / "summary.json").write_text(
                 json.dumps(evidence, indent=2) + "\n"
             )
-            if passed and not evidence["cleanup_port_closed"]:
-                raise AssertionError(
-                    "A test-owned MCP port remained open after cleanup"
-                )
+            if passed and not cleanup_ok:
+                raise AssertionError(evidence["failure"])
     print(
         json.dumps(
             {
@@ -712,6 +854,46 @@ class ProtocolHelpersTest(unittest.TestCase):
                 ),
                 endpoint,
             )
+
+    def test_owned_temp_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "synthetic-cache").write_text("test data")
+            self.assertTrue(remove_owned_temp(root))
+            self.assertFalse(root.exists())
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux process identities only")
+    def test_owned_descendant_cleanup(self):
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE,
+        )
+        try:
+            record = wait_until(
+                lambda: next(
+                    (
+                        item
+                        for item in descendant_records(os.getpid())
+                        if item["pid"] == child.pid
+                    ),
+                    None,
+                ),
+                3,
+                "synthetic child identity",
+            )
+            # A reused PID must never signal a different process.
+            self.assertTrue(
+                cleanup_owned_processes([{**record, "birth": "not-this-process"}])
+            )
+            self.assertIsNone(child.poll())
+            self.assertTrue(cleanup_owned_processes([record]))
+            child.wait(timeout=3)
+        finally:
+            if child.stdin is not None:
+                child.stdin.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=3)
 
     def test_diagnostic_redaction(self):
         value = redact_diagnostic(

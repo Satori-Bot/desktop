@@ -173,8 +173,10 @@ fn official_core_mcp_acceptance() {
     )
     .unwrap();
     let (d, m) = manager();
-    std::fs::write(d.path().join("hello.txt"), "desktop acceptance\n").unwrap();
-    let mut w = workspace(d.path());
+    let project = d.path().join("项目 空间 (MCP)");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("hello.txt"), "desktop acceptance\n").unwrap();
+    let mut w = workspace(&project);
     w.core_command = command;
     let w = m.save_workspace(w, None).unwrap();
     let status = m.start(&w.id).unwrap();
@@ -337,4 +339,17 @@ fn successful_shutdown_closes_admission_but_stop_all_does_not() {
         .contains("shutting down"));
     assert_eq!(manager.snapshot().statuses[0].state, "stopped");
     assert!(TcpListener::bind(("127.0.0.1", workspace.port)).is_ok());
+}
+
+#[test]
+fn workspace_name_limit_counts_unicode_characters_not_utf8_bytes() {
+    let (dir, manager) = manager();
+    let mut value = workspace(dir.path());
+    value.name = "项目".repeat(40);
+    let saved = manager.save_workspace(value, None).unwrap();
+    assert_eq!(saved.name.chars().count(), 80);
+    let mut too_long = saved.clone();
+    too_long.name = "项".repeat(121);
+    assert!(manager.save_workspace(too_long, None).is_err());
+    assert_eq!(manager.snapshot().workspaces[0].name, saved.name);
 }

@@ -168,7 +168,7 @@ impl Manager {
             w.id = uuid::Uuid::new_v4().simple().to_string();
         }
         valid_id(&w.id)?;
-        if w.name.trim().is_empty() || w.name.len() > 120 {
+        if w.name.trim().is_empty() || w.name.chars().count() > 120 {
             bail!("Enter a workspace name of 1 to 120 characters");
         }
         let path = Path::new(&w.path)

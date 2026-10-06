@@ -94,6 +94,8 @@ const zh: Record<string, string> = {
   "Copy endpoint": "复制端点",
   "Copy config": "复制配置",
   Copied: "已复制",
+  "Operation feedback": "操作反馈",
+  "Dismiss notification": "关闭通知",
   "Copy failed": "复制失败",
   Safe: "安全模式",
   Trusted: "信任模式",

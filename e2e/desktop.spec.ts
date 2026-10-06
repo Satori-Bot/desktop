@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { changeError, ipcCalls, mockDesktop } from "./fixtures";
 
 const nav = (page: Page, name: string) =>
@@ -292,6 +292,91 @@ test("language save rerenders navigation from saved settings", async ({
   await nav(page, "概览").click();
   await expect(page.getByText("CPU 使用率", { exact: true })).toBeVisible();
 });
+
+async function expectFeedbackInViewport(page: Page, alert: Locator) {
+  await expect(alert).toBeInViewport({ ratio: 1 });
+  const bounds = await alert.boundingBox();
+  const viewport = page.viewportSize();
+  expect(bounds).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  if (!bounds || !viewport) throw new Error("Feedback geometry unavailable");
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.y).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(viewport.width);
+  expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height);
+}
+
+for (const viewport of [
+  { width: 1280, height: 720 },
+  { width: 390, height: 844 },
+]) {
+  test(`runtime save feedback stays in the scrolled Settings viewport at ${viewport.width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    await mockDesktop(page, {
+      stopped: true,
+      delays: { save_workspace: 350 },
+    });
+    await openDesktop(page);
+    if (viewport.width < 800)
+      await page.getByRole("button", { name: "Open navigation" }).click();
+    await nav(page, "Settings").click();
+    await page.getByLabel("Executable path").fill("/test-fixtures/core-one");
+    const save = page.getByRole("button", { name: "Save runtime selection" });
+    await save.scrollIntoViewIfNeeded();
+    await expect
+      .poll(() => page.evaluate(() => window.scrollY))
+      .toBeGreaterThan(100);
+    await save.click();
+    const feedback = page.getByRole("region", { name: "Operation feedback" });
+    const success = feedback.getByRole("status");
+    await expect(success).toHaveText("Saved");
+    await expect(save).toBeDisabled();
+    await expectFeedbackInViewport(page, success);
+    await expect(feedback).toHaveCSS("position", "fixed");
+    await expect(feedback).toHaveCSS("pointer-events", "none");
+    await expect(success).toHaveCSS("pointer-events", "auto");
+    expect(
+      await feedback.evaluate((node) => Number(getComputedStyle(node).zIndex)),
+    ).toBeLessThan(200);
+    await page.screenshot({
+      path: `screenshots/fixture-settings-saved-${viewport.width}.png`,
+      animations: "disabled",
+    });
+
+    await changeError(
+      page,
+      "save_workspace",
+      "TEST FIXTURE: runtime selection denied",
+    );
+    await page.getByLabel("Executable path").fill("/test-fixtures/core-two");
+    await save.click();
+    await expect(success).toHaveCount(0);
+    const error = feedback.getByRole("alert");
+    await expect(error).toHaveText("TEST FIXTURE: runtime selection denied");
+    await expectFeedbackInViewport(page, error);
+    await page.screenshot({
+      path: `screenshots/fixture-settings-error-${viewport.width}.png`,
+      animations: "disabled",
+    });
+    expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(100);
+    await expect(page.getByLabel("Executable path")).toHaveValue(
+      "/test-fixtures/core-two",
+    );
+
+    await changeError(page, "save_workspace");
+    await save.click();
+    await expect(error).toHaveCount(0);
+    await expect(success).toHaveText("Saved");
+    await expectFeedbackInViewport(page, success);
+    await feedback
+      .getByRole("button", { name: "Dismiss notification" })
+      .click();
+    await expect(feedback).toHaveCount(0);
+    expect(await ipcCalls(page, "save_workspace")).toHaveLength(3);
+  });
+}
 
 test("diagnostics, incremental logs and redacted download are explicit actions", async ({
   page,
