@@ -211,8 +211,10 @@ impl Manager {
         self.config.lock().unwrap().clone()
     }
     fn workspace(&self, id: &str) -> Result<(Workspace, Secrets)> {
+        Self::workspace_in(&self.config.lock().unwrap(), id)
+    }
+    fn workspace_in(c: &Config, id: &str) -> Result<(Workspace, Secrets)> {
         valid_id(id)?;
-        let c = self.config();
         let w = c
             .workspaces
             .iter()
@@ -243,40 +245,54 @@ impl Manager {
         s.checked_at = now();
     }
     pub fn snapshot(&self) -> Snapshot {
-        let c = self.config();
-        Snapshot {
-            statuses: c
+        // Saves publish configuration and stopped status under the same config
+        // lock. Keep that boundary here so one response cannot pair an old port,
+        // access mode or workspace list with status from a later save.
+        let (workspaces, settings, managed_core, previous_core, mut statuses) = {
+            let c = self.config.lock().unwrap();
+            let statuses: Vec<_> = c
                 .workspaces
                 .iter()
-                .map(|w| {
-                    let mut status = self.slot(w).status.lock().unwrap().clone();
-                    if status.public_state == "ready"
-                        && status
-                            .public_checked_at
-                            .as_deref()
-                            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                            .is_none_or(|time| {
-                                chrono::Utc::now().signed_duration_since(time)
-                                    >= chrono::Duration::minutes(5)
-                            })
-                    {
-                        status.public_state = "unverified".into();
-                        status.public_message =
-                            "Public discovery check expired; run diagnostics to verify the route."
-                                .into();
-                    }
-                    status
-                })
-                .collect(),
-            workspaces: c.workspaces.clone(),
-            settings: c.settings,
+                .map(|w| self.slot(w).status.lock().unwrap().clone())
+                .collect();
+            (
+                c.workspaces.clone(),
+                c.settings.clone(),
+                c.managed_core.clone(),
+                c.previous_core.clone(),
+                statuses,
+            )
+        };
+        let checked_now = chrono::Utc::now();
+        for status in &mut statuses {
+            if status.public_state == "ready"
+                && status
+                    .public_checked_at
+                    .as_deref()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .is_none_or(|time| {
+                        checked_now.signed_duration_since(time) >= chrono::Duration::minutes(5)
+                    })
+            {
+                status.public_state = "unverified".into();
+                status.public_message =
+                    "Public discovery check expired; run diagnostics to verify the route.".into();
+            }
+        }
+        Snapshot {
+            statuses,
+            workspaces,
+            settings,
             migration_notice: self.migration_notice.clone(),
-            core_available: match c.managed_core.as_ref() {
+            core_available: match managed_core {
                 Some(path) => {
-                    Path::new(path).is_absolute() && core::is_executable_file(Path::new(path))
+                    Path::new(&path).is_absolute() && core::is_executable_file(Path::new(&path))
                 }
                 None => core::find_program("coding-tools-mcp").is_some(),
             },
+            rollback_available: previous_core.is_some_and(|path| {
+                Path::new(&path).is_absolute() && core::is_executable_file(Path::new(&path))
+            }),
             cloudflared_available: core::find_program("cloudflared").is_some(),
         }
     }
@@ -403,12 +419,22 @@ impl Manager {
         // Re-read after the lifecycle lock: a concurrent edit/delete may have
         // completed since the initial lookup used to locate this stable slot.
         let (w, secrets) = self.workspace(id)?;
+        self.start_locked(w, secrets, &slot, &mut session)
+    }
+    fn start_locked(
+        &self,
+        w: Workspace,
+        secrets: Secrets,
+        slot: &Slot,
+        session: &mut Session,
+    ) -> Result<Status> {
+        let id = &w.id;
         if session.runtime.as_mut().is_some_and(|p| p.alive())
             && !slot.status.lock().unwrap().cleanup_pending
         {
             return Ok(slot.status.lock().unwrap().clone());
         }
-        self.update(&slot, |s| {
+        self.update(slot, |s| {
             s.state = "starting".into();
             s.local_state = "starting".into();
             s.local_message = "Starting the external Python core".into();
@@ -428,7 +454,7 @@ impl Manager {
             session.runtime = None;
             session.public_url.clear();
             *slot.run_started_ms.lock().unwrap() = None;
-            self.update(&slot, |s| {
+            self.update(slot, |s| {
                 *s = Status::stopped(&w);
                 s.state = "starting".into();
                 s.local_state = "starting".into();
@@ -476,7 +502,7 @@ impl Manager {
             session.runtime = Some(process);
             spawned = true;
             let process = session.runtime.as_mut().unwrap();
-            self.update(&slot, |s| s.pid = Some(process.pid()));
+            self.update(slot, |s| s.pid = Some(process.pid()));
             // CPython's HTTPServer performs reverse-DNS lookup before listen.
             // Some macOS resolver configurations take >30s; keep protocol
             // readiness mandatory while allowing that supported core to finish.
@@ -497,7 +523,7 @@ impl Manager {
                     Err(e) => last = format!("{e:#}"),
                 }
                 if cfg!(target_os = "macos") && process.started.elapsed().as_secs() >= 10 {
-                    self.update(&slot,|s|s.local_message="Waiting for the Python core to finish starting. macOS hostname lookup can take about 30 seconds; readiness is still being checked.".into());
+                    self.update(slot,|s|s.local_message="Waiting for the Python core to finish starting. macOS hostname lookup can take about 30 seconds; readiness is still being checked.".into());
                 }
                 thread::sleep(Duration::from_millis(150));
             }
@@ -513,8 +539,8 @@ impl Manager {
                     - process.started.elapsed().as_millis() as i64,
             );
             let activity_available = state.join("events/journal.lock").is_file();
-            self.update(&slot,|s|{s.activity_state=if activity_available{"available"}else{"unavailable"}.into();s.activity_message=if activity_available{"Reading real calls from this core's private event journal"}else{"This core build does not expose a tool-call journal. Published 0.5.0 supports launch and connection; history requires an event-capable official core executable."}.into();});
-            self.update(&slot, |s| {
+            self.update(slot,|s|{s.activity_state=if activity_available{"available"}else{"unavailable"}.into();s.activity_message=if activity_available{"Reading real calls from this core's private event journal"}else{"This core build does not expose a tool-call journal. Published 0.5.0 supports launch and connection; history requires an event-capable official core executable."}.into();});
+            self.update(slot, |s| {
                 s.state = "running".into();
                 s.pid = Some(pid);
                 s.local_state = "ready".into();
@@ -526,7 +552,7 @@ impl Manager {
                     .into();
                 s.local_message = last;
             });
-            self.start_tunnel_inner(&w, &secrets, &slot, &mut session);
+            self.start_tunnel_inner(&w, &secrets, slot, session);
             Ok(())
         })();
         if let Err(e) = result {
@@ -555,7 +581,7 @@ impl Manager {
                 .runtime
                 .as_mut()
                 .and_then(|p| p.alive().then_some(p.pid()));
-            self.update(&slot, |s| {
+            self.update(slot, |s| {
                 s.state = "error".into();
                 s.local_state = "error".into();
                 s.local_message = message.clone();
@@ -697,7 +723,10 @@ impl Manager {
             anyhow!("Workspace operation is in progress; wait for startup to finish")
         })?;
         let (w, _) = self.workspace(id)?;
-        self.update(&slot, |s| {
+        self.stop_locked(&w, &slot, &mut session)
+    }
+    fn stop_locked(&self, w: &Workspace, slot: &Slot, session: &mut Session) -> Result<Status> {
+        self.update(slot, |s| {
             s.state = "stopping".into();
             s.local_message = "Stopping owned processes and verifying port release".into();
         });
@@ -719,7 +748,7 @@ impl Manager {
                 .runtime
                 .as_mut()
                 .and_then(|p| p.alive().then_some(p.pid()));
-            self.update(&slot, |s| {
+            self.update(slot, |s| {
                 s.state = "error".into();
                 s.local_state = "error".into();
                 s.local_message = e.to_string();
@@ -745,13 +774,23 @@ impl Manager {
             return Err(e);
         }
         session.public_url.clear();
-        let status = Status::stopped(&w);
+        let status = Status::stopped(w);
         *slot.status.lock().unwrap() = status.clone();
         Ok(status)
     }
     pub fn restart(&self, id: &str) -> Result<Status> {
-        self.stop(id)?;
-        self.start(id)
+        let (w, _) = self.workspace(id)?;
+        let slot = self.slot(&w);
+        let mut session = slot
+            .session
+            .try_lock()
+            .map_err(|_| anyhow!("Workspace operation is already in progress"))?;
+        self.ensure_active()?;
+        let (w, secrets) = self.workspace(id)?;
+        // Do not let an edit or another lifecycle action enter between stop and start.
+        self.stop_locked(&w, &slot, &mut session)?;
+        self.ensure_active()?;
+        self.start_locked(w, secrets, &slot, &mut session)
     }
     pub fn refresh(&self) {
         let c = self.config();
@@ -1002,16 +1041,20 @@ impl Manager {
         )?)
     }
     pub fn connection_config(&self, id: &str, public: bool) -> Result<String> {
-        let (w, s) = self.workspace(id)?;
-        let slot = self.slot(&w);
-        let status = slot.status.lock().unwrap();
-        let endpoint = if public {
-            if status.public_endpoint.is_empty() {
-                bail!("No active public endpoint");
-            }
-            status.public_endpoint.clone()
-        } else {
-            status.local_endpoint.clone()
+        let (w, s, endpoint) = {
+            let c = self.config.lock().unwrap();
+            let (w, s) = Self::workspace_in(&c, id)?;
+            let slot = self.slot(&w);
+            let status = slot.status.lock().unwrap();
+            let endpoint = if public {
+                if status.public_endpoint.is_empty() {
+                    bail!("No active public endpoint");
+                }
+                status.public_endpoint.clone()
+            } else {
+                status.local_endpoint.clone()
+            };
+            (w, s, endpoint)
         };
         let mut entry = json!({"url":endpoint});
         if w.auth == "bearer" {
@@ -1129,6 +1172,13 @@ impl Manager {
             .context("Workspace no longer exists")? = w.clone();
         self.storage.save(&next)?;
         *config = next;
+        let mut status = slot.status.lock().unwrap();
+        let mut next_status = Status::stopped(&w);
+        if status.port_release_pending {
+            next_status.port_release_pending = true;
+            next_status.local_message = status.local_message.clone();
+        }
+        *status = next_status;
         Ok(w)
     }
     /// Quitting closes admission before enumerating services. Owned cleanup
@@ -1204,6 +1254,62 @@ mod admission_regressions {
             .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
         let executable = core::find_program(&name).expect("Python fixture executable");
         vec![executable.to_string_lossy().into(), "-c".into(), script]
+    }
+
+    #[test]
+    fn concurrent_snapshots_never_pair_saved_workspace_settings_with_another_port() {
+        let (_dir, manager, mut workspace) = fixture();
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let reader = {
+            let manager = Arc::clone(&manager);
+            let ready = Arc::clone(&ready);
+            thread::spawn(move || {
+                ready.wait();
+                for _ in 0..300 {
+                    let snapshot = manager.snapshot();
+                    let w = &snapshot.workspaces[0];
+                    let status = &snapshot.statuses[0];
+                    assert_eq!(status.workspace_id, w.id);
+                    assert_eq!(
+                        status.local_endpoint,
+                        format!("http://127.0.0.1:{}/mcp", w.port)
+                    );
+                    thread::yield_now();
+                }
+            })
+        };
+        ready.wait();
+        for n in 0..20 {
+            workspace.port = 41000 + n % 2;
+            workspace = manager.save_workspace(workspace, None).unwrap();
+        }
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn rejected_restart_does_not_stop_or_change_status() {
+        let (_dir, manager, workspace) = fixture();
+        let slot = manager.slot(&workspace);
+        manager.update(&slot, |status| {
+            status.local_message = "Before restart".into()
+        });
+        manager.shutting_down.store(true, Ordering::SeqCst);
+        assert!(manager.restart(&workspace.id).is_err());
+        assert_eq!(
+            manager.snapshot().statuses[0].local_message,
+            "Before restart"
+        );
+    }
+
+    #[test]
+    fn rollback_availability_tracks_the_previous_executable_without_running_it() {
+        let (_dir, manager, _) = fixture();
+        assert!(!manager.snapshot().rollback_available);
+        manager.config.lock().unwrap().previous_core =
+            Some(std::env::current_exe().unwrap().to_string_lossy().into());
+        assert!(manager.snapshot().rollback_available);
+        manager.config.lock().unwrap().previous_core = Some("definitely-missing".into());
+        assert!(!manager.snapshot().rollback_available);
     }
 
     #[test]

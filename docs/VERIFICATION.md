@@ -152,3 +152,7 @@ uninstall completes. Note whether WebView2 is already present; test a machine
 without it as well if supported by that installer. A passing NSIS run does not
 clear the MSI gate. Do not publish MSI until the quiet install regression is
 reproduced/diagnosed and the corrected artifact passes.
+
+The [Windows installer acceptance guide](WINDOWS-INSTALLATION.md) documents the
+checked-in smoke harness, its artifact evidence, and the missing-WebView2 /
+interactive checks still required for release.

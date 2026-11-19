@@ -41,7 +41,7 @@ import {
   X,
 } from "lucide-react";
 import { api, backendAvailable } from "./api";
-import type { Activity, Settings, Snapshot, Workspace } from "./types";
+import type { Activity, Settings, Snapshot, Status, Workspace } from "./types";
 import { errorText, isActive } from "./types";
 import { blockingOperation, isMaintenance } from "./operations";
 import type { Operation } from "./operations";
@@ -76,6 +76,30 @@ const navigation = [
   { name: "Diagnostics", icon: Wrench },
   { name: "Settings", icon: Settings2 },
 ] as const;
+// These commands do not change the manager snapshot. In particular, a
+// stalled status read must not delay a local copy or reveal.
+const readOnlyOperations = new Set([
+  "config",
+  "copy-config",
+  "credentials",
+  "open",
+]);
+const lifecycleOperations = new Set([
+  "start",
+  "stop",
+  "restart",
+  "retry-tunnel",
+]);
+
+function isWorkspaceStatus(value: unknown, id: string): value is Status {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "workspaceId" in value &&
+    value.workspaceId === id &&
+    "state" in value
+  );
+}
 export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [selected, setSelected] = useState("");
@@ -110,14 +134,21 @@ export default function App() {
     opened: confirm !== null,
     shouldReturnFocus: !confirmationCompleted.current,
   });
-  const [calls, setCalls] = useState<Activity[]>([]);
-  const [activityError, setActivityError] = useState("");
+  const [activity, setActivity] = useState<{
+    target: string;
+    calls: Activity[];
+    error: string;
+  }>();
   const [menuOpen, setMenuOpen] = useState(false);
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
   const available = backendAvailable();
   const t = translator(snapshot?.settings.language ?? "en");
   const workspace = snapshot?.workspaces.find((w) => w.id === selected);
   const status = snapshot?.statuses.find((s) => s.workspaceId === selected);
+  const activityTarget = JSON.stringify([selected, status?.pid]);
+  const calls = activity?.target === activityTarget ? activity.calls : [];
+  const activityError =
+    activity?.target === activityTarget ? activity.error : "";
   const active = isActive(status);
   const missingCore = snapshot?.coreAvailable === false;
   // A workspace may explicitly select its own official executable.
@@ -197,20 +228,21 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     let activityPending = false;
-    setCalls([]);
-    setActivityError("");
     if (!selected || !available) return;
     const update = async () => {
       if (activityPending) return;
       activityPending = true;
       try {
         const next = await api.activity(selected);
-        if (!cancelled) {
-          setCalls(next);
-          setActivityError("");
-        }
+        if (!cancelled)
+          setActivity({ target: activityTarget, calls: next, error: "" });
       } catch (e) {
-        if (!cancelled) setActivityError(errorText(e));
+        if (!cancelled)
+          setActivity((current) => ({
+            target: activityTarget,
+            calls: current?.target === activityTarget ? current.calls : [],
+            error: errorText(e),
+          }));
       } finally {
         activityPending = false;
       }
@@ -221,7 +253,7 @@ export default function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [selected, available, status?.pid]);
+  }, [selected, available, activityTarget]);
   function reportFailure(message: string) {
     // Concurrent operations may both fail. Keep each actionable error visible,
     // even when an older operation finishes after a newer independent action.
@@ -250,10 +282,31 @@ export default function App() {
         ? `${targetName ?? workspaceId}: ${message}`
         : message;
     setFeedback(null);
+    const shouldRefresh = key !== "quit" && !readOnlyOperations.has(key);
     try {
       const result = await fn();
       if (mounted.current) {
-        await refresh(true);
+        if (
+          workspaceId &&
+          lifecycleOperations.has(key) &&
+          isWorkspaceStatus(result, workspaceId)
+        ) {
+          const status = result;
+          setSnapshot((current) =>
+            current?.workspaces.some((item) => item.id === workspaceId)
+              ? {
+                  ...current,
+                  statuses: [
+                    ...current.statuses.filter(
+                      (item) => item.workspaceId !== workspaceId,
+                    ),
+                    status,
+                  ],
+                }
+              : current,
+          );
+        }
+        if (shouldRefresh) await refresh(true);
         if (
           mounted.current &&
           success &&
@@ -271,6 +324,9 @@ export default function App() {
       return result;
     } catch (e) {
       if (mounted.current) {
+        // Some lifecycle operations stop a process or change its port status
+        // before reporting failure. Reconcile even on rejection.
+        if (shouldRefresh) void refresh(true);
         const action = {
           install: "Install version",
           rollback: "Roll back",

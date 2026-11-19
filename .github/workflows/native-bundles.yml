@@ -15,6 +15,7 @@ on:
       - 'tsconfig*.json'
       - 'index.html'
       - '.github/workflows/native-bundles.yml'
+      - 'scripts/test-windows-installer.ps1'
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+        os: [ubuntu-24.04, macos-latest, macos-15-intel, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -58,4 +59,37 @@ jobs:
         with:
           name: native-linux-deb
           path: target/release/bundle/deb/*.deb
+  windows-quiet-install:
+    name: Windows quiet install (${{ matrix.installer }})
+    needs: bundles
+    runs-on: windows-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        installer: [msi, nsis]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: native-bundles-windows-latest
+          path: native-bundles
+      - name: Exercise exact Windows bundle
+        shell: pwsh
+        env:
+          INSTALLER: ${{ matrix.installer }}
+        run: |
+          $pattern = if ($env:INSTALLER -eq 'msi') { '*.msi' } else { '*-setup.exe' }
+          $files = @(Get-ChildItem native-bundles -Recurse -File -Filter $pattern)
+          if ($files.Count -ne 1) { throw "Expected exactly one $pattern; found $($files.Count)." }
+          ./scripts/test-windows-installer.ps1 -Kind $env:INSTALLER `
+            -BundlePath $files[0].FullName -LogDirectory windows-installer-logs `
+            -DisposableMachine -TimeoutSeconds 180
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: windows-quiet-install-${{ matrix.installer }}
+          path: windows-installer-logs/
+          if-no-files-found: warn
+
 # Builds review artifacts only. Publishing/signing a release is a separate explicit step.

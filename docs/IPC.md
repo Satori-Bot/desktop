@@ -7,7 +7,7 @@ Types (camelCase):
 - Settings: { language: 'en'|'zh', closeToTray: boolean }
 - Status: { workspaceId: string, state: 'stopped'|'starting'|'running'|'error'|'stopping', pid: number|null, cleanupPending: boolean, portReleasePending: boolean, localState: string, publicState: string, localMessage: string, publicMessage: string, localEndpoint: string, publicEndpoint: string, cpuPercent: number, memoryBytes: number, uptimeSeconds: number, checkedAt: string, publicCheckedAt: string|null, coreVersion: string, activityState: 'available'|'unavailable'|'unknown', activityMessage: string }
 - Activity: { id: string, tool: string, startedAt: string, finishedAt: string|null, outcome: string, durationMs: number|null, errorCategory: string|null, runtimeId: string }
-- Snapshot: { workspaces: Workspace[], statuses: Status[], settings: Settings, migrationNotice: string|null, coreAvailable: boolean, cloudflaredAvailable: boolean }
+- Snapshot: { workspaces: Workspace[], statuses: Status[], settings: Settings, migrationNotice: string|null, coreAvailable: boolean, rollbackAvailable: boolean, cloudflaredAvailable: boolean }
 - Diagnostic: { level: 'ok'|'warning'|'error', name: string, message: string }
 - Logs: { text: string, cursor: number, truncated: boolean }
 

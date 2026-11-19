@@ -69,6 +69,11 @@ export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
             );
           if (state.errors[command]) throw state.errors[command];
           if (command === "validate_workspace_path") return String(args?.path);
+          if (command === "validate_core_override") return null;
+          if (command === "pick_core_executable")
+            return "/test-fixtures/selected-core";
+          if (command === "check_public_route")
+            return "TEST FIXTURE: public endpoint verified";
           if (command === "snapshot") return structuredClone(state.snapshot);
           if (command === "activity") return structuredClone(initialCalls);
           if (command === "pick_directory")

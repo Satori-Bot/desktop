@@ -214,6 +214,7 @@ pub struct Snapshot {
     pub settings: Settings,
     pub migration_notice: Option<String>,
     pub core_available: bool,
+    pub rollback_available: bool,
     pub cloudflared_available: bool,
 }
 #[derive(Serialize)]

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useFocusReturn } from "@mantine/hooks";
 import {
   Alert,
@@ -94,11 +94,38 @@ export function ConnectionsPage({
   onSaved: (w: Workspace) => void;
 }) {
   const pageActive = usePageActive();
-  const [config, setConfig] = useState<{
+  const workspaceKey = JSON.stringify(workspace);
+  const localKey = JSON.stringify([workspaceKey, status?.localEndpoint]);
+  const publicKey = JSON.stringify([workspaceKey, status?.publicEndpoint]);
+  const latestConnection = useRef({
+    workspaceKey,
+    localKey,
+    publicKey,
+    status,
+    t,
+  });
+  useLayoutEffect(() => {
+    latestConnection.current = { workspaceKey, localKey, publicKey, status, t };
+  }, [workspaceKey, localKey, publicKey, status, t]);
+  const [shownConfig, setConfig] = useState<{
     text: string;
     isPublic: boolean;
+    key: string;
   } | null>(null);
-  const [credentials, setCredentials] = useState<AuthDetails | null>(null);
+  const [shownCredentials, setCredentials] = useState<{
+    value: AuthDetails;
+    key: string;
+  } | null>(null);
+  const config =
+    shownConfig?.key === (shownConfig?.isPublic ? publicKey : localKey)
+      ? shownConfig
+      : null;
+  const credentials =
+    shownCredentials?.key === workspaceKey ? shownCredentials.value : null;
+  useEffect(() => {
+    if (shownConfig && !config) setConfig(null);
+    if (shownCredentials && !credentials) setCredentials(null);
+  }, [shownConfig, config, shownCredentials, credentials]);
   const [tunnelName, setTunnelName] = useState(
     workspace.tunnelName ||
       workspace.name.replace(/[^a-zA-Z0-9-]/g, "-").toLowerCase(),
@@ -120,24 +147,39 @@ export function ConnectionsPage({
   const [validation, setValidation] = useState("");
   const active = isActive(status);
   const setupBusy = busy || maintenanceBusy;
-  async function copyConfig(text: string, isPublic: boolean) {
-    const warning = configWarning(status, isPublic, t);
-    await onCopy(text, [t("Copied"), warning].filter(Boolean).join(" "));
-  }
   async function showConfig(isPublic: boolean, copyOnly = false) {
+    const key = isPublic ? publicKey : localKey;
     const result = await run(copyOnly ? "copy-config" : "config", () =>
       api.connectionConfig(workspace.id, isPublic),
     );
-    if (pageActive.current && result !== undefined) {
-      if (copyOnly) await copyConfig(result, isPublic);
-      else setConfig({ text: result, isPublic });
+    const latest = latestConnection.current;
+    if (
+      pageActive.current &&
+      result !== undefined &&
+      key === (isPublic ? latest.publicKey : latest.localKey)
+    ) {
+      if (copyOnly) {
+        const warning = configWarning(latest.status, isPublic, latest.t);
+        await onCopy(
+          result,
+          [latest.t("Copied"), warning].filter(Boolean).join(" "),
+        );
+      } else {
+        setConfig({ text: result, isPublic, key });
+      }
     }
   }
   async function showCredentials() {
     const result = await run("credentials", () =>
       api.authDetails(workspace.id),
     );
-    if (pageActive.current && result) setCredentials(result);
+    if (
+      pageActive.current &&
+      result &&
+      workspaceKey === latestConnection.current.workspaceKey
+    ) {
+      setCredentials({ value: result, key: workspaceKey });
+    }
   }
   function requestTunnel() {
     if (
@@ -505,9 +547,9 @@ export function ConnectionsPage({
           </Code>
           <Button
             leftSection={<Clipboard size={15} />}
-            onClick={() =>
-              config && void copyConfig(config.text, config.isPublic)
-            }
+            loading={busy === "copy-config"}
+            disabled={!!busy && busy !== "copy-config"}
+            onClick={() => config && void showConfig(config.isPublic, true)}
           >
             {t("Copy config")}
           </Button>
@@ -673,6 +715,7 @@ export function DiagnosticsPage({
     status?.pid,
     status?.state,
     status?.localState,
+    status?.publicEndpoint,
   ]);
   const [lastCheck, setLastCheck] = useState<{
     rows: Diagnostic[];
