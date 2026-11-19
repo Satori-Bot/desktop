@@ -1,6 +1,9 @@
 export type Language = "en" | "zh";
 const zh: Record<string, string> = {
   "Install core": "安装核心",
+  "First setup needs internet to download the Core and, if needed, Python.":
+    "首次设置需要联网下载核心，并在需要时下载 Python。",
+  "Choose or enter an executable path": "选择或输入可执行文件路径",
   "Core installation required": "需要安装核心",
   "Install Core before creating and starting a workspace.":
     "请先安装核心，再创建并启动工作区。",
@@ -240,7 +243,7 @@ const zh: Record<string, string> = {
   "Local service remains available. Fix the tunnel without restarting your tools.":
     "本地服务仍然可用。可以修复隧道，无需重启工具。",
   "Retry tunnel": "重试隧道",
-  "Temporary Quick Tunnel": "临时 Quick Tunnel",
+  "Temporary Quick Tunnel": "临时隧道",
   "This URL changes after a restart. Use a named tunnel for a stable address and browser authentication.":
     "重启后地址会改变。固定地址和浏览器认证请使用命名隧道。",
   "Stable Cloudflare tunnel": "稳定的 Cloudflare 隧道",

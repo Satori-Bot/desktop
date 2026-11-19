@@ -39,6 +39,7 @@ pub struct Manager {
     migration_notice: Option<String>,
     install_lock: Mutex<()>,
     supervisor: Option<PathBuf>,
+    bundled_uv: Option<PathBuf>,
     shutting_down: AtomicBool,
 }
 // Reuse one availability check for allocation, startup and Stop confirmation.
@@ -166,17 +167,27 @@ fn validate_access(w: &Workspace, starting: bool) -> Result<()> {
 }
 impl Manager {
     pub fn open(home: PathBuf) -> Result<Arc<Self>> {
-        Self::open_inner(home, None)
+        Self::open_native(home, None, None)
     }
     /// Native Unix launches re-enter this executable in private supervisor mode.
     /// Headless embedders may use `open` when they own their outer process lifetime.
     pub fn open_supervised(home: PathBuf, supervisor: PathBuf) -> Result<Arc<Self>> {
-        if !supervisor.is_absolute() || !core::is_executable_file(&supervisor) {
+        Self::open_native(home, Some(supervisor), None)
+    }
+
+    /// The native shell resolves a bundled installer from its installed binary directory.
+    /// Headless use and unbundled developer builds keep external uv discovery.
+    pub fn open_native(
+        home: PathBuf,
+        supervisor: Option<PathBuf>,
+        bundled_uv: Option<PathBuf>,
+    ) -> Result<Arc<Self>> {
+        if supervisor
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute() || !core::is_executable_file(path))
+        {
             bail!("Supervisor must be an absolute executable path");
         }
-        Self::open_inner(home, Some(supervisor))
-    }
-    fn open_inner(home: PathBuf, supervisor: Option<PathBuf>) -> Result<Arc<Self>> {
         let storage = Storage::open(home)?;
         let (config, migration_notice) = storage.load()?;
         let manager = Arc::new(Self {
@@ -186,6 +197,7 @@ impl Manager {
             migration_notice,
             install_lock: Mutex::new(()),
             supervisor,
+            bundled_uv,
             shutting_down: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&manager);
@@ -1096,7 +1108,8 @@ impl Manager {
             .try_lock()
             .map_err(|_| anyhow!("Core installation is already in progress"))?;
         self.ensure_active()?;
-        let (path, pending) = core::install(&self.storage, version)?;
+        let (path, pending) =
+            core::install_with_bundled_uv(&self.storage, version, self.bundled_uv.as_deref())?;
         let mut c = self.config.lock().unwrap();
         let mut n = c.clone();
         n.previous_core = n.managed_core.clone();
@@ -1116,7 +1129,7 @@ impl Manager {
             .config()
             .previous_core
             .context("No previous managed core is available")?;
-        core::version_output(std::slice::from_ref(&previous), &self.storage.home)?;
+        core::managed_version_output(std::slice::from_ref(&previous), &self.storage.home)?;
         let mut c = self.config.lock().unwrap();
         let mut n = c.clone();
         n.previous_core = n.managed_core.clone();

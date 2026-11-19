@@ -13,14 +13,13 @@ for (const language of ["en", "zh"] as const) {
     snapshot.settings.language = language;
     await mockDesktop(page, { snapshot });
     await page.goto("/");
-    await page
-      .getByRole("navigation")
-      .getByRole("button", { name: t("Settings"), exact: true })
-      .click();
     expect(await ipcCalls(page, "install_core")).toHaveLength(0);
     await page
-      .getByRole("button", { name: `${t("Install recommended Core")} (0.5.0)` })
+      .getByRole("button", { name: t("Install core"), exact: true })
       .click();
+    await expect(
+      page.getByRole("button", { name: t("Install core"), exact: true }),
+    ).toHaveCount(0);
     expect(await ipcCalls(page, "install_core")).toHaveLength(1);
     await expect(
       page.getByRole("button", { name: t("Create your first workspace") }),
@@ -29,7 +28,9 @@ for (const language of ["en", "zh"] as const) {
       .getByRole("button", { name: t("Create your first workspace") })
       .click();
     const dialog = page.getByRole("dialog", { name: t("New workspace") });
-    await dialog.getByLabel(t("Workspace name")).fill("New project");
+    const name = dialog.getByLabel(t("Workspace name"));
+    await expect(name).toBeFocused();
+    await name.fill("New project");
     await dialog
       .getByLabel(t("Folder path"))
       .fill("/test-fixtures/new-project");

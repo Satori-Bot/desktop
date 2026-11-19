@@ -8,6 +8,7 @@ param(
     [Parameter(Mandatory)][switch]$DisposableMachine,
     [ValidateSet('Any', 'Present', 'Absent')][string]$ExpectedWebView2 = 'Any',
     [ValidateRange(30, 600)][int]$TimeoutSeconds = 180,
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$ExpectedBundledUvVersion,
     [switch]$RequireMainWindow
 )
 
@@ -54,15 +55,31 @@ function Get-WebViewVersion {
     }
 }
 
-function Invoke-Installer([string]$Phase, [string]$Executable, [string[]]$Arguments) {
+function Invoke-Installer(
+    [string]$Phase,
+    [string]$Executable,
+    [string[]]$Arguments,
+    [string]$OutputPath
+) {
     $step = [ordered]@{ pid = $null; elapsedSeconds = $null; exitCode = $null; timedOut = $false }
     $result[$Phase] = $step
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    $worker = Start-Process -FilePath $Executable -ArgumentList $Arguments -PassThru
+    $parameters = @{ FilePath = $Executable; ArgumentList = $Arguments; PassThru = $true }
+    $limit = $TimeoutSeconds
+    if ($OutputPath) {
+        $parameters.RedirectStandardOutput = $OutputPath
+        $limit = 15
+    }
+    $worker = Start-Process @parameters
     $step.pid = $worker.Id
     try {
-        if (-not $worker.WaitForExit($TimeoutSeconds * 1000)) {
+        if (-not $worker.WaitForExit($limit * 1000)) {
             $step.timedOut = $true
+            if ($OutputPath) {
+                # The standalone version probe is ours, not an installer/service.
+                if (-not $worker.HasExited) { $worker.Kill() }
+                throw "$Phase did not finish after $limit seconds."
+            }
             # Do not kill the Windows Installer service or start a second transaction.
             # A timeout leaves the VM tainted; collect logs, then discard/reset it.
             throw "$Phase timed out after $TimeoutSeconds seconds. Preserve the logs and reset the disposable VM."
@@ -91,6 +108,8 @@ $result = [ordered]@{
     webViewBefore = @(Get-WebViewVersion)
     webViewAfter = @()
     install = $null
+    bundledUvProbe = $null
+    bundledUvVersion = $null
     launch = $null
     uninstall = $null
     errors = @()
@@ -137,6 +156,18 @@ try {
     }
 
     $installedPath = $candidates[0]
+    if ($ExpectedBundledUvVersion) {
+        $uv = Join-Path (Split-Path -Parent $installedPath) 'coding-tools-mcp-uv.exe'
+        if (-not (Test-Path -LiteralPath $uv -PathType Leaf)) {
+            throw 'Installed application is missing its bundled Core helper.'
+        }
+        $uvOutput = Join-Path $logs 'bundled-uv-version.txt'
+        Invoke-Installer -Phase bundledUvProbe -Executable $uv -Arguments @('--version') -OutputPath $uvOutput
+        $result.bundledUvVersion = (Get-Content -LiteralPath $uvOutput -Raw).Trim()
+        if ($result.bundledUvVersion -notmatch ("^uv " + [regex]::Escape($ExpectedBundledUvVersion) + '(\s|$)')) {
+            throw "Bundled Core helper did not report the pinned uv version $ExpectedBundledUvVersion."
+        }
+    }
     $result.launch = [ordered]@{ stayedRunning = $false; mainWindowObserved = $false }
     $app = Start-Process -FilePath $installedPath -PassThru
     $deadline = [datetime]::UtcNow.AddSeconds(30)
@@ -188,7 +219,9 @@ try {
             $deadline = [datetime]::UtcNow.AddSeconds(20)
             do {
                 $remaining = @($allRoots | ForEach-Object {
-                    Join-Path (Join-Path $_ $product) $binary
+                    $directory = Join-Path $_ $product
+                    Join-Path $directory $binary
+                    if ($ExpectedBundledUvVersion) { Join-Path $directory 'coding-tools-mcp-uv.exe' }
                 } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
                 if ($remaining.Count -eq 0 -and @(Get-ProductEntries).Count -eq 0) { break }
                 if ([datetime]::UtcNow -ge $deadline) { throw 'Uninstall did not remove the app executable and registration.' }

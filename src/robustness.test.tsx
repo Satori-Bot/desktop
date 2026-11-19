@@ -982,8 +982,18 @@ describe("saved drafts and accessible history", () => {
       opener.focus();
       fireEvent.click(opener);
       const dialog = screen.getByRole("dialog", { name: title });
-      within(dialog).getByRole("checkbox").focus();
-      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+      if (trigger === "Quit application") {
+        expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
+        expect(
+          within(dialog).getByRole("button", { name: "Quit" }),
+        ).toBeEnabled();
+        await tick(20);
+        expect(cancel).toHaveFocus();
+      } else {
+        within(dialog).getByRole("checkbox").focus();
+      }
+      fireEvent.click(cancel);
       await tick(20);
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       expect(opener).toHaveFocus();

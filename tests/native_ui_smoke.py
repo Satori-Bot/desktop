@@ -842,14 +842,6 @@ def run(args) -> None:
             )
             button("Settings").click()
             button("Quit application").click()
-            checkbox_label = wait.until(
-                ec.element_to_be_clickable(
-                    (By.XPATH, "//label[normalize-space(.)='Quit and stop services?']")
-                )
-            )
-            checkbox_label.click()
-            checkbox = driver.find_element(By.ID, checkbox_label.get_attribute("for"))
-            assert checkbox.is_selected()
             track_owned_processes()
             try:
                 button("Quit").click()

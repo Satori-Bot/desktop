@@ -274,13 +274,36 @@ fn main() {
         .setup(|app| {
             let manager = match Manager::default_home().and_then(|home| {
                 #[cfg(unix)]
-                {
-                    Manager::open_supervised(home, std::env::current_exe()?)
-                }
+                let supervisor = Some(std::env::current_exe()?);
                 #[cfg(not(unix))]
-                {
-                    Manager::open(home)
-                }
+                let supervisor = None;
+
+                // Only activate the sidecar in builds with its packaging overlay.
+                // Use Tauri's actual executable location (including AppImage) and
+                // the specific packaged binary name, not the working directory.
+                let bundled_uv =
+                    if app
+                        .config()
+                        .bundle
+                        .external_bin
+                        .as_ref()
+                        .is_some_and(|binaries| {
+                            binaries
+                                .iter()
+                                .any(|path| path == "gen/runtime-installer/coding-tools-mcp-uv")
+                        })
+                    {
+                        let executable = tauri::utils::platform::current_exe()?;
+                        let name = if cfg!(windows) {
+                            "coding-tools-mcp-uv.exe"
+                        } else {
+                            "coding-tools-mcp-uv"
+                        };
+                        Some(executable.with_file_name(name))
+                    } else {
+                        None
+                    };
+                Manager::open_native(home, supervisor, bundled_uv)
             }) {
                 Ok(manager) => manager,
                 Err(error) => {

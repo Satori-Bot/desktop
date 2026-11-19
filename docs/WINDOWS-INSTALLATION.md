@@ -1,6 +1,6 @@
 # Windows installer acceptance
 
-[Native bundles](../.github/workflows/native-bundles.yml) must build before this check. The `windows-quiet-install` jobs test the exact MSI and NSIS artifacts from that workflow on **separate disposable Windows runners**, so an MSI timeout cannot block or contaminate the NSIS test. Each records the artifact SHA-256, Windows version, elevation, WebView2 registration and the install/launch/uninstall results. MSI also writes immediately flushed verbose logs. Artifact names begin with `windows-quiet-install-`. A skipped or approval-pending job is not a pass.
+[Native bundles](../.github/workflows/native-bundles.yml) must build before this check. The `windows-quiet-install` jobs test the exact MSI and NSIS artifacts from that workflow on **separate disposable Windows runners**, so an MSI timeout cannot block or contaminate the NSIS test. Each records the artifact SHA-256, Windows version, elevation, WebView2 registration, the installed Core helper version, and the install/launch/uninstall results. MSI also writes immediately flushed verbose logs. Artifact names begin with `windows-quiet-install-`. A skipped or approval-pending job is not a pass.
 
 The hosted test verifies that the installed process starts and remains alive, not that WebView2 rendered the first screen or that the installer can provision WebView2 on a missing-runtime machine. For release, use the same artifact on a clean interactive Windows VM snapshot:
 
@@ -14,7 +14,7 @@ The hosted test verifies that the installed process starts and remains alive, no
   -LogDirectory 'C:\qa\nsis-logs' -DisposableMachine -RequireMainWindow
 ```
 
-Verify visually that the application renders the initial workspace screen. Exercise the default Core setup on an account without Python, then test the existing-Core choice independently. Take another snapshot with WebView2 absent **only on a Windows image that supports this scenario**; run with `-ExpectedWebView2 Absent` to exercise runtime provisioning rather than assuming it ran. Do not remove the machine's regular WebView2 installation just to create the fixture. After a timeout, collect the logs and revert the VM; do not kill all `msiexec` processes or start another install while the previous transaction may be active. Logs from manual VMs can contain paths or account names; review before sharing.
+Pass `-ExpectedBundledUvVersion (python scripts/prepare-bundled-uv.py --version)` when testing a bundle expected to ship that helper. Verify visually that the application renders the initial workspace screen. Exercise the default Core setup on an account without Python, then test the existing-Core choice independently. Take another snapshot with WebView2 absent **only on a Windows image that supports this scenario**; run with `-ExpectedWebView2 Absent` to exercise runtime provisioning rather than assuming it ran. Do not remove the machine's regular WebView2 installation just to create the fixture. After a timeout, collect the logs and revert the VM; do not kill all `msiexec` processes or start another install while the previous transaction may be active. Logs from manual VMs can contain paths or account names; review before sharing.
 
 ## Triaging the reported quiet MSI timeout
 

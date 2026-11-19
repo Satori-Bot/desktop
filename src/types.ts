@@ -1,3 +1,5 @@
+export const RECOMMENDED_CORE_VERSION = "0.5.0";
+
 export type Access = "local" | "quick" | "named" | "frp";
 export interface Workspace {
   id: string;
@@ -68,6 +70,7 @@ export interface Snapshot {
   settings: Settings;
   migrationNotice: string | null;
   coreAvailable: boolean;
+  rollbackAvailable?: boolean;
   cloudflaredAvailable: boolean;
 }
 export interface Diagnostic {
@@ -90,7 +93,7 @@ export const blankWorkspace = (): Workspace => ({
   auth: "noauth",
   permissionMode: "safe",
   coreCommand: [],
-  coreVersion: "0.5.0",
+  coreVersion: RECOMMENDED_CORE_VERSION,
   tunnelName: "",
   credentialsFile: "",
   tokenConfigured: false,

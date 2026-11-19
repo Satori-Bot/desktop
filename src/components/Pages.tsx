@@ -44,7 +44,12 @@ import type {
   Status,
   Workspace,
 } from "../types";
-import { activityOutcome, errorText, isActive } from "../types";
+import {
+  activityOutcome,
+  errorText,
+  isActive,
+  RECOMMENDED_CORE_VERSION,
+} from "../types";
 import { useSavedDraft } from "../hooks/useSavedDraft";
 import { usePageActive } from "../hooks/usePageActive";
 import { SecretInput } from "./SecretInput";
@@ -954,6 +959,7 @@ export function SettingsPage({
   settings,
   available,
   coreAvailable,
+  rollbackAvailable,
   cloudflaredAvailable,
   run,
   busy,
@@ -972,6 +978,7 @@ export function SettingsPage({
   settings: Settings;
   available: boolean;
   coreAvailable: boolean | null;
+  rollbackAvailable?: boolean;
   cloudflaredAvailable: boolean | null;
   run: RunAction;
   busy: string;
@@ -1132,15 +1139,15 @@ export function SettingsPage({
         </Alert>
         <Button
           mb="md"
-          onClick={() => void install("0.5.0")}
+          onClick={() => void install(RECOMMENDED_CORE_VERSION)}
+          loading={maintenanceBusy === "install"}
           disabled={!available || !!maintenanceBusy}
         >
-          {t("Install recommended Core")} (0.5.0)
+          {t("Install recommended Core")} ({RECOMMENDED_CORE_VERSION})
         </Button>
         <div className="core-install">
           <TextInput
             label={t("Version to install")}
-            autoFocus={coreAvailable === false}
             placeholder={t("For example, 0.5.0")}
             description={t(
               "Enter a published version. The example is not filled in automatically.",
@@ -1177,14 +1184,22 @@ export function SettingsPage({
             loading={maintenanceBusy === "rollback"}
             disabled={
               !available ||
+              rollbackAvailable === false ||
               (!!maintenanceBusy && maintenanceBusy !== "rollback")
             }
           >
             {t("Roll back")}
           </Button>
         </div>
+        {rollbackAvailable === false && (
+          <Text c="dimmed" size="xs" mt="sm">
+            {t("No previous managed core is available")}
+          </Text>
+        )}
         <Text c="dimmed" size="xs" mt="md">
-          {t("Install requires uv and network access.")}
+          {t(
+            "First setup needs internet to download the Core and, if needed, Python.",
+          )}
         </Text>
         <Text c="dimmed" size="xs" mt={5}>
           {t(
@@ -1326,7 +1341,10 @@ function RuntimeOverride({
       <Stack gap="md">
         <TextInput
           label={t("Executable path")}
-          placeholder="/path/to/venv/bin/coding-tools-mcp"
+          placeholder={t("Choose or enter an executable path")}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
           value={executable}
           onChange={(event) =>
             setDraft({ ...draft, executable: event.currentTarget.value })
@@ -1335,6 +1353,9 @@ function RuntimeOverride({
         />
         <Textarea
           label={t("Arguments (one per line)")}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
           value={argumentsText}
           onChange={(event) =>
             setDraft({ ...draft, argumentsText: event.currentTarget.value })

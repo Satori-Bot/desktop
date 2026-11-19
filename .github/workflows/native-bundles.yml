@@ -14,6 +14,7 @@ on:
       - 'vite.config.ts'
       - 'tsconfig*.json'
       - 'index.html'
+      - 'scripts/prepare-bundled-uv.py'
       - '.github/workflows/native-bundles.yml'
       - 'scripts/test-windows-installer.ps1'
   workflow_dispatch:
@@ -33,17 +34,42 @@ jobs:
           node-version: '22'
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Stage checksum-verified Core installer sidecar
+        run: python scripts/prepare-bundled-uv.py
+      - name: Exercise bundled installer and download an isolated Python and Core
+        shell: bash
+        timeout-minutes: 8
+        run: |
+          host="$(rustc --print host-tuple)"
+          exe="src-tauri/gen/runtime-installer/coding-tools-mcp-uv-$host"
+          if [[ "$host" == *-windows-* ]]; then exe="$exe.exe"; fi
+          "$exe" --version
+          export DESKTOP_BUNDLED_UV_ACCEPTANCE="$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$exe")"
+          cargo test -p desktop-manager --locked --lib core::tests::packaged_uv_isolates_a_real_managed_python_install -- --ignored --exact
       - name: Linux prerequisites
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: npm ci
-      - run: npm run tauri build -- -- --locked
-      - name: Check native Linux license resources
+      - run: npm run tauri build -- --config src-tauri/gen/runtime-installer/tauri-runtime.json -- --locked
+      - name: Check native Linux installer and license resources
         if: runner.os == 'Linux'
         run: |
           dpkg-deb --contents target/release/bundle/deb/*.deb > bundle-contents.txt
           grep '/LICENSE$' bundle-contents.txt
           grep '/NOTICE$' bundle-contents.txt
+          grep -E '^-rwx.* \./usr/bin/coding-tools-mcp-uv$' bundle-contents.txt
+          grep '/third-party/uv/LICENSE-MIT$' bundle-contents.txt
+          grep '/third-party/uv/LICENSE-APACHE$' bundle-contents.txt
+      - name: Check macOS application includes executable installer
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          helper="$(find target/release/bundle/macos -path '*/Contents/MacOS/coding-tools-mcp-uv' -type f)"
+          test -n "$helper" && test -x "$helper"
+          "$helper" --version
       - uses: actions/upload-artifact@v6
         with:
           name: native-bundles-${{ matrix.os }}
@@ -82,9 +108,11 @@ jobs:
           $pattern = if ($env:INSTALLER -eq 'msi') { '*.msi' } else { '*-setup.exe' }
           $files = @(Get-ChildItem native-bundles -Recurse -File -Filter $pattern)
           if ($files.Count -ne 1) { throw "Expected exactly one $pattern; found $($files.Count)." }
+          $uvVersion = python scripts/prepare-bundled-uv.py --version
+          if ($LASTEXITCODE -ne 0 -or -not $uvVersion) { throw 'Could not read the bundled uv version pin.' }
           ./scripts/test-windows-installer.ps1 -Kind $env:INSTALLER `
             -BundlePath $files[0].FullName -LogDirectory windows-installer-logs `
-            -DisposableMachine -TimeoutSeconds 180
+            -DisposableMachine -TimeoutSeconds 180 -ExpectedBundledUvVersion $uvVersion
       - uses: actions/upload-artifact@v6
         if: always()
         with:

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   Alert,
   Badge,
@@ -31,6 +31,8 @@ import type { Access, Secrets, Workspace } from "../types";
 import type { Translate } from "../i18n";
 import { usePageActive } from "../hooks/usePageActive";
 import { SecretInput } from "./SecretInput";
+
+type WorkspaceField = "name" | "path" | "port" | "core";
 function validate(workspace: Workspace, t: Translate) {
   if (!workspace.name.trim() || !workspace.path.trim())
     return t("Name and folder are required.");
@@ -53,6 +55,7 @@ export function WorkspaceModal({
   t,
   coreAvailable,
   onInstallCore,
+  installBusy = "",
   opened = true,
   locked = false,
 }: {
@@ -61,7 +64,8 @@ export function WorkspaceModal({
   onSaved: (workspace: Workspace) => void;
   t: Translate;
   coreAvailable: boolean;
-  onInstallCore: () => void;
+  onInstallCore: (onError: (message: string) => void) => void | Promise<void>;
+  installBusy?: string;
   opened?: boolean;
   locked?: boolean;
 }) {
@@ -85,17 +89,83 @@ export function WorkspaceModal({
   const [secrets, setSecrets] = useState<Secrets>({});
   const [step, setStep] = useState(0);
   const [error, setError] = useState("");
+  const [errorField, setErrorField] = useState<WorkspaceField>();
+  const nameInput = useRef<HTMLInputElement>(null);
+  const pathInput = useRef<HTMLInputElement>(null);
+  const portInput = useRef<HTMLInputElement>(null);
+  const coreInput = useRef<HTMLInputElement>(null);
+  const errorSummary = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
   const edit = !!workspace;
   const needsCore = !coreAvailable && override.length === 0;
   const update = (patch: Partial<Workspace>) =>
     setDraft((d) => ({ ...d, ...patch }));
+  function clearError() {
+    setErrorField(undefined);
+    setError("");
+  }
+  function fail(message: string, field?: WorkspaceField) {
+    setErrorField(field);
+    setError(message);
+  }
+  function fieldError(field: WorkspaceField) {
+    return error && errorField === field ? (
+      <span role="alert">{error}</span>
+    ) : undefined;
+  }
+  function clearFieldError(field: WorkspaceField) {
+    if (errorField === field) clearError();
+  }
+  useEffect(() => {
+    if (!opened || busy || !error) return;
+    const field = {
+      name: nameInput,
+      path: pathInput,
+      port: portInput,
+      core: coreInput,
+    };
+    (errorField ? field[errorField].current : errorSummary.current)?.focus();
+  }, [opened, busy, error, errorField]);
+  useEffect(() => {
+    if (opened && showCore) coreInput.current?.focus();
+  }, [opened, showCore]);
+  function goNextWithEnter(event: KeyboardEvent<HTMLInputElement>) {
+    if (
+      edit ||
+      step !== 0 ||
+      locked ||
+      busy ||
+      event.key !== "Enter" ||
+      event.repeat ||
+      event.nativeEvent.isComposing ||
+      event.keyCode === 229
+    )
+      return;
+    event.preventDefault();
+    void next();
+  }
+  async function install() {
+    if (!pageActive.current || lock.current || locked || installBusy) return;
+    lock.current = true;
+    setBusy(true);
+    clearError();
+    try {
+      await onInstallCore((message) => {
+        if (pageActive.current) fail(t(message));
+      });
+    } catch (error) {
+      if (pageActive.current) fail(t(errorText(error)));
+    } finally {
+      lock.current = false;
+      if (pageActive.current) setBusy(false);
+    }
+  }
   async function browse() {
     if (!pageActive.current || lock.current || locked) return;
     lock.current = true;
     setBusy(true);
-    setError("");
+    clearError();
     try {
       const path = await api.pickDirectory();
       if (pageActive.current && path)
@@ -105,7 +175,7 @@ export function WorkspaceModal({
           name: d.name || path.split(/[\\/]/).filter(Boolean).at(-1) || "",
         }));
     } catch (e) {
-      if (pageActive.current) setError(t(errorText(e)));
+      if (pageActive.current) fail(t(errorText(e)));
     } finally {
       lock.current = false;
       if (pageActive.current) setBusy(false);
@@ -115,12 +185,12 @@ export function WorkspaceModal({
     if (!pageActive.current || lock.current || locked) return;
     lock.current = true;
     setBusy(true);
-    setError("");
+    clearError();
     try {
       const path = await api.pickCoreExecutable();
       if (pageActive.current && path) setCorePath(path);
     } catch (e) {
-      if (pageActive.current) setError(t(errorText(e)));
+      if (pageActive.current) fail(t(errorText(e)));
     } finally {
       lock.current = false;
       if (pageActive.current) setBusy(false);
@@ -134,28 +204,44 @@ export function WorkspaceModal({
       portText.trim() !== "" &&
       (!/^\d+$/.test(portText.trim()) || port < 1 || port > 65535)
     ) {
-      setError(
+      fail(
         t(
           "Enter a whole port number from 1 to 65535, or leave blank for automatic.",
         ),
+        "port",
       );
       return;
     }
     if (showCore && !corePath.trim() && (start || coreArgs.trim())) {
-      setError(t("Enter an existing core executable."));
+      fail(t("Enter an existing core executable."), "core");
       return;
     }
     const invalid = validate(draft, t);
     if (invalid) {
-      setError(invalid);
+      fail(
+        invalid,
+        edit
+          ? !draft.name.trim()
+            ? "name"
+            : !draft.path.trim()
+              ? "path"
+              : undefined
+          : undefined,
+      );
       return;
     }
     lock.current = true;
     setBusy(true);
-    setError("");
+    clearError();
     try {
-      if (showCore && corePath.trim())
-        await api.validateCoreOverride(draft.path, override);
+      if (showCore && corePath.trim()) {
+        try {
+          await api.validateCoreOverride(draft.path, override);
+        } catch (error) {
+          if (pageActive.current) fail(t(errorText(error)), "core");
+          return;
+        }
+      }
       const saved = await api.saveWorkspace(
         {
           ...draft,
@@ -174,8 +260,8 @@ export function WorkspaceModal({
           await api.start(saved.id);
         } catch (e) {
           if (!pageActive.current) return;
-          setError(
-            `${t("Created successfully. Start failed; your workspace is saved and can be retried.")} ${t(errorText(e))}`,
+          fail(
+            `${t("Created successfully. Start failed; your workspace is saved and can be retried.")} ${errorText(e)}`,
           );
           setStep(3);
           return;
@@ -183,7 +269,20 @@ export function WorkspaceModal({
       }
       if (pageActive.current) onClose();
     } catch (e) {
-      if (pageActive.current) setError(t(errorText(e)));
+      if (pageActive.current) {
+        const message = errorText(e);
+        const field =
+          message ===
+          "A workspace already has this name; choose a different name"
+            ? "name"
+            : message ===
+                "Another workspace already uses this port; choose a different port"
+              ? "port"
+              : message === "Choose an existing workspace folder"
+                ? "path"
+                : undefined;
+        fail(t(message), edit ? field : undefined);
+      }
     } finally {
       if (pageActive.current) setBusy(false);
       lock.current = false;
@@ -192,7 +291,10 @@ export function WorkspaceModal({
   async function next() {
     if (step === 0) {
       if (!draft.name.trim() || !draft.path.trim()) {
-        setError(t("Name and folder are required."));
+        fail(
+          t("Name and folder are required."),
+          draft.name.trim() ? "path" : "name",
+        );
         return;
       }
       if (backendAvailable()) {
@@ -204,7 +306,7 @@ export function WorkspaceModal({
           if (!pageActive.current) return;
           update({ path });
         } catch (e) {
-          if (pageActive.current) setError(t(errorText(e)));
+          if (pageActive.current) fail(t(errorText(e)), "path");
           return;
         } finally {
           lock.current = false;
@@ -214,10 +316,10 @@ export function WorkspaceModal({
     }
     const invalid = step === 1 ? validate(draft, t) : null;
     if (invalid) {
-      setError(invalid);
+      fail(invalid);
       return;
     }
-    setError("");
+    clearError();
     setStep((s) => s + 1);
   }
   function access(value: string) {
@@ -239,8 +341,15 @@ export function WorkspaceModal({
       <TextInput
         label={t("Workspace name")}
         placeholder="my-project"
+        ref={nameInput}
+        data-autofocus={!locked || undefined}
         value={draft.name}
-        onChange={(e) => update({ name: e.currentTarget.value })}
+        error={fieldError("name")}
+        onKeyDown={goNextWithEnter}
+        onChange={(e) => {
+          update({ name: e.currentTarget.value });
+          clearFieldError("name");
+        }}
         disabled={busy || locked}
         required
       />
@@ -250,8 +359,14 @@ export function WorkspaceModal({
         autoCapitalize="off"
         autoCorrect="off"
         spellCheck={false}
+        ref={pathInput}
         value={draft.path}
-        onChange={(e) => update({ path: e.currentTarget.value })}
+        error={fieldError("path")}
+        onKeyDown={goNextWithEnter}
+        onChange={(e) => {
+          update({ path: e.currentTarget.value });
+          clearFieldError("path");
+        }}
         disabled={busy || locked}
         required
         rightSectionWidth={92}
@@ -322,6 +437,10 @@ export function WorkspaceModal({
             <TextInput
               label={t("Public HTTPS URL")}
               placeholder="https://mcp.example.com"
+              type="url"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
               value={draft.publicUrl}
               onChange={(e) => update({ publicUrl: e.currentTarget.value })}
               disabled={busy || locked}
@@ -380,12 +499,18 @@ export function WorkspaceModal({
             <>
               <TextInput
                 label={t("Tunnel name")}
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
                 value={draft.tunnelName}
                 onChange={(e) => update({ tunnelName: e.currentTarget.value })}
                 disabled={busy || locked}
               />
               <TextInput
                 label={t("Credentials file")}
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
                 value={draft.credentialsFile}
                 onChange={(e) =>
                   update({ credentialsFile: e.currentTarget.value })
@@ -425,8 +550,13 @@ export function WorkspaceModal({
           placeholder={t("Automatic")}
           description={t("Leave blank to choose an available port.")}
           inputMode="numeric"
+          ref={portInput}
           value={portText}
-          onChange={(event) => setPortText(event.currentTarget.value)}
+          error={fieldError("port")}
+          onChange={(event) => {
+            setPortText(event.currentTarget.value);
+            clearFieldError("port");
+          }}
           disabled={busy || locked}
         />
       )}
@@ -450,14 +580,30 @@ export function WorkspaceModal({
             color="orange"
             title={t("Choose a Core to start this workspace")}
           >
+            <Text size="sm" mb="xs">
+              {t(
+                "First setup needs internet to download the Core and, if needed, Python.",
+              )}
+            </Text>
             <Group>
-              <Button size="xs" onClick={onInstallCore} disabled={busy}>
-                {t("Install core")}
-              </Button>
+              {!coreAvailable && (
+                <Button
+                  size="xs"
+                  onClick={() => void install()}
+                  loading={installBusy === "install"}
+                  disabled={busy || !!installBusy}
+                >
+                  {t("Install core")}
+                </Button>
+              )}
               <Button
                 size="xs"
                 variant="default"
-                onClick={() => setShowCore(!showCore)}
+                aria-expanded={showCore}
+                onClick={() => {
+                  setShowCore(!showCore);
+                  clearError();
+                }}
                 disabled={busy}
               >
                 {t("Use existing Core")}
@@ -467,8 +613,13 @@ export function WorkspaceModal({
               <Stack mt="sm" gap="xs">
                 <TextInput
                   label={t("Existing core executable")}
+                  ref={coreInput}
                   value={corePath}
-                  onChange={(event) => setCorePath(event.currentTarget.value)}
+                  error={fieldError("core")}
+                  onChange={(event) => {
+                    setCorePath(event.currentTarget.value);
+                    clearFieldError("core");
+                  }}
                   rightSectionWidth={92}
                   rightSection={
                     <Button
@@ -581,8 +732,14 @@ export function WorkspaceModal({
           <Text>{t("Workspace created")}</Text>
         )}
         <Divider />
-        {error && (
-          <Alert color="red" icon={<AlertCircle size={17} />} role="alert">
+        {error && !errorField && (
+          <Alert
+            ref={errorSummary}
+            tabIndex={-1}
+            color="red"
+            icon={<AlertCircle size={17} />}
+            role="alert"
+          >
             {error}
           </Alert>
         )}
@@ -591,6 +748,7 @@ export function WorkspaceModal({
             variant="subtle"
             color="gray"
             onClick={onClose}
+            data-autofocus={locked || undefined}
             disabled={busy}
           >
             {t(step === 3 ? "Done" : "Cancel")}
@@ -601,7 +759,7 @@ export function WorkspaceModal({
                 variant="default"
                 onClick={() => {
                   setStep(step - 1);
-                  setError("");
+                  clearError();
                 }}
                 disabled={busy || locked}
               >
@@ -656,6 +814,7 @@ export function ConfirmModal({
   onClose,
   busy,
   t,
+  requiresAcknowledgement = true,
 }: {
   title: string;
   detail: string;
@@ -664,6 +823,7 @@ export function ConfirmModal({
   onClose: () => void;
   busy: boolean;
   t: Translate;
+  requiresAcknowledgement?: boolean;
 }) {
   const [checked, setChecked] = useState(false);
   return (
@@ -679,21 +839,28 @@ export function ConfirmModal({
     >
       <Stack>
         <Text size="sm">{detail}</Text>
-        <Checkbox
-          label={title}
-          checked={checked}
-          onChange={(e) => setChecked(e.currentTarget.checked)}
-          disabled={busy}
-        />
+        {requiresAcknowledgement && (
+          <Checkbox
+            label={title}
+            checked={checked}
+            onChange={(e) => setChecked(e.currentTarget.checked)}
+            disabled={busy}
+          />
+        )}
         <Group justify="end">
-          <Button variant="default" onClick={onClose} disabled={busy}>
+          <Button
+            data-autofocus
+            variant="default"
+            onClick={onClose}
+            disabled={busy}
+          >
             {t("Cancel")}
           </Button>
           <Button
             color="red"
             onClick={onConfirm}
             loading={busy}
-            disabled={!checked}
+            disabled={busy || (requiresAcknowledgement && !checked)}
           >
             {label}
           </Button>

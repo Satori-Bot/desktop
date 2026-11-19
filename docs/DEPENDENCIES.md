@@ -30,3 +30,18 @@ cargo tree --target all -i glib
 ```
 
 Advisory results can change as the public databases evolve. Native builds and tests still need to pass after dependency changes; an audit result alone is not runtime acceptance.
+
+
+## Linux: Chinese text and input
+
+- If Chinese text appears as empty squares in the app and other desktop apps,
+  install a CJK font using your distribution's package manager (for example,
+  Debian's [fonts-noto-cjk](https://packages.debian.org/trixie/fonts-noto-cjk))
+  and reopen the app. This is font coverage, not lost input.
+- If pasted Chinese text displays correctly but typing does not, first check
+  that the same Chinese input source works in another GTK application. Report
+  a problem specific to Desktop with your OS version, X11 or Wayland session,
+  WebKitGTK version, and input method (for example, IBus or Fcitx). Browser
+  tests of composition events do not verify a native IME end to end.
+
+Desktop does not install fonts or change input sources automatically.

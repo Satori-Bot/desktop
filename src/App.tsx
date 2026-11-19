@@ -42,7 +42,7 @@ import {
 } from "lucide-react";
 import { api, backendAvailable } from "./api";
 import type { Activity, Settings, Snapshot, Status, Workspace } from "./types";
-import { errorText, isActive } from "./types";
+import { errorText, isActive, RECOMMENDED_CORE_VERSION } from "./types";
 import { blockingOperation, isMaintenance } from "./operations";
 import type { Operation } from "./operations";
 import { translator } from "./i18n";
@@ -377,8 +377,23 @@ export default function App() {
     editorSaved.current = false;
     setWorkspaceModal(workspace);
   }
+  async function installRecommendedCore(onError?: (message: string) => void) {
+    await run(
+      "install",
+      async () => {
+        try {
+          return await api.installCore(RECOMMENDED_CORE_VERSION);
+        } catch (error) {
+          if (!onError) throw error;
+          onError(errorText(error));
+          return undefined;
+        }
+      },
+      onError ? undefined : t("Core installation completed"),
+    );
+  }
   function installCore() {
-    navigate("Settings");
+    void installRecommendedCore();
   }
   function openConfirmation(confirmation: Confirmation) {
     confirmationCompleted.current = false;
@@ -459,6 +474,9 @@ export default function App() {
       }
     } else if (confirm?.kind === "quit") {
       await run("quit", api.quit);
+      // The desktop may reject Quit; reveal the operation feedback rather
+      // than leaving it behind the confirmation modal.
+      setConfirm(null);
     }
   }
   return (
@@ -672,10 +690,20 @@ export default function App() {
               icon={<CircleAlert size={18} />}
               title={t("Core installation required")}
             >
-              {t("Set up a Core before starting a workspace.")}
-              <Button ml="sm" size="xs" onClick={installCore}>
-                {t("Install core")}
-              </Button>
+              {t(
+                "First setup needs internet to download the Core and, if needed, Python.",
+              )}
+              {!workspace && (
+                <Button
+                  ml="sm"
+                  size="xs"
+                  onClick={installCore}
+                  loading={maintenanceBusy === "install"}
+                  disabled={!!maintenanceBusy && maintenanceBusy !== "install"}
+                >
+                  {t("Install core")}
+                </Button>
+              )}
             </Alert>
           )}
           {loading ? (
@@ -690,6 +718,7 @@ export default function App() {
               }
               available={available && !!snapshot}
               coreAvailable={snapshot?.coreAvailable ?? null}
+              rollbackAvailable={snapshot?.rollbackAvailable}
               cloudflaredAvailable={snapshot?.cloudflaredAvailable ?? null}
               run={run}
               busy={settingsBusy}
@@ -811,8 +840,10 @@ export default function App() {
                         disabled={
                           !!workspaceBusy ||
                           transitional ||
-                          !!status?.portReleasePending
+                          !!status?.portReleasePending ||
+                          (needsCore && !!maintenanceBusy)
                         }
+                        loading={needsCore && maintenanceBusy === "install"}
                         onClick={() =>
                           needsCore
                             ? installCore()
@@ -846,7 +877,11 @@ export default function App() {
                   ) : needsCore ? (
                     <Button
                       leftSection={<Terminal size={16} />}
-                      disabled={!!maintenanceBusy || !available}
+                      loading={maintenanceBusy === "install"}
+                      disabled={
+                        (!!maintenanceBusy && maintenanceBusy !== "install") ||
+                        !available
+                      }
                       onClick={installCore}
                     >
                       {t("Install core")}
@@ -1113,6 +1148,7 @@ export default function App() {
         >
           <Alert
             className="operation-alert"
+            tabIndex={feedback.kind === "error" ? 0 : undefined}
             color={feedback.kind === "error" ? "red" : "teal"}
             variant="filled"
             icon={
@@ -1147,7 +1183,8 @@ export default function App() {
           onClose={closeEditor}
           onSaved={saved}
           coreAvailable={!missingCore}
-          onInstallCore={installCore}
+          onInstallCore={installRecommendedCore}
+          installBusy={maintenanceBusy}
           t={t}
         />
       )}{" "}
@@ -1164,6 +1201,7 @@ export default function App() {
               : "All running workspaces will be stopped.",
           )}`}
           label={t(confirm.kind === "delete" ? "Remove" : "Quit")}
+          requiresAcknowledgement={confirm.kind === "delete"}
           onConfirm={() => void confirmed()}
           onClose={() => setConfirm(null)}
           busy={
