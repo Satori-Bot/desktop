@@ -375,14 +375,16 @@ fn official_core_mcp_acceptance() {
     } else {
         assert_eq!(m.snapshot().statuses[0].activity_state, "unavailable");
         assert!(activity.is_empty());
-        assert!(m
-            .diagnose(&w.id)
-            .unwrap()
+        let diagnostics = m.diagnose(&w.id).unwrap();
+        let history = diagnostics
             .iter()
-            .any(|d| d.name == "Tool activity"
-                && d.level == "warning"
-                && d.message
-                    .contains("d7c2dda48bcedbd066c7dbc24a1b63205384d269")));
+            .find(|check| check.name == "Tool activity")
+            .expect("diagnostics explain why tool history is unavailable");
+        assert_eq!(history.level, "warning");
+        assert!(history
+            .message
+            .contains("does not record tool-call history"));
+        assert!(history.message.contains("You can still connect and use it"));
     }
     // A real restart must release the prior journal/process, preserve history,
     // and expose only the capabilities of the newly launched core.
