@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
 };
 use tauri::{Emitter, Manager as _, State};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 type AppManager = Arc<Manager>;
 async fn work<T: Send + 'static>(
     manager: AppManager,
@@ -49,6 +49,7 @@ operation!(restart_workspace, restart, Status);
 operation!(retry_tunnel, retry_tunnel, Status);
 operation!(activity, activity, Vec<Activity>);
 operation!(diagnose, diagnose, Vec<Diagnostic>);
+operation!(check_public_route, check_public_route, String);
 operation!(export_diagnostics, export_diagnostics, String);
 operation!(auth_details, auth_details, serde_json::Value);
 #[tauri::command]
@@ -103,11 +104,39 @@ async fn setup_named_tunnel(
     .await
 }
 #[tauri::command]
-async fn pick_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+async fn validate_workspace_path(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.dialog()
-            .file()
-            .blocking_pick_folder()
+        desktop_manager::runtime::validate_workspace_folder(&path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn validate_core_override(path: String, args: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        desktop_manager::core::validate_override(&args, std::path::Path::new(&path))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn pick_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    pick_path(app, true).await
+}
+#[tauri::command]
+async fn pick_core_executable(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    pick_path(app, false).await
+}
+async fn pick_path(app: tauri::AppHandle, directory: bool) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let picker = app.dialog().file();
+        let selection = if directory {
+            picker.blocking_pick_folder()
+        } else {
+            picker.blocking_pick_file()
+        };
+        selection
             .map(|f| {
                 f.into_path().map_err(|e| e.to_string()).and_then(|p| {
                     p.into_os_string()
@@ -161,28 +190,81 @@ fn request_quit(app: tauri::AppHandle) {
         }
     });
 }
+fn startup_error(app: &tauri::App, error: desktop_manager::Error) {
+    use desktop_manager::storage::{Storage, CONFIG_BACKUP, CONFIG_FILE};
+    app.state::<AtomicBool>().store(true, Ordering::SeqCst);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    let handle = app.handle().clone();
+    let home = Manager::default_home().ok();
+    let can_restore = home.as_ref().is_some_and(|dir| {
+        Storage::open(dir.clone()).is_ok_and(|storage| storage.has_recoverable_backup())
+    });
+    let location = home.as_ref().map_or(String::new(), |dir| {
+        format!(
+            "\n\nConfiguration: {}\nBackup: {}",
+            dir.join(CONFIG_FILE).display(),
+            dir.join(CONFIG_BACKUP).display()
+        )
+    });
+    let dialog = app.dialog().message(format!(
+        "{error:#}{location}\n\nOriginal files were preserved. Close this dialog and reopen the app after repairing or restoring the configuration."
+    )).title("Coding Tools MCP could not start").kind(MessageDialogKind::Error);
+    if !can_restore {
+        dialog.show(move |_| handle.exit(1));
+        return;
+    }
+    dialog
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Restore backup".into(),
+            "Close".into(),
+        ))
+        .show(move |restore| {
+            if !restore {
+                handle.exit(1);
+                return;
+            }
+            tauri::async_runtime::spawn_blocking(move || {
+                let result = Manager::default_home()
+                    .and_then(Storage::open)
+                    .and_then(|s| s.restore_backup());
+                let text = match result {
+                    Ok(()) => "Backup restored. Reopen Coding Tools MCP.".to_owned(),
+                    Err(error) => format!("Could not restore the backup: {error:#}"),
+                };
+                let app = handle.clone();
+                handle.dialog().message(text).show(move |_| app.exit(1));
+            });
+        });
+}
+
 fn main() {
     if let Some(code) = desktop_manager::supervisor::run_if_requested() {
         std::process::exit(code);
     }
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| show(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if app.try_state::<AppManager>().is_some() {
+                show(app);
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .manage(AtomicBool::new(false))
         .setup(|app| {
             let manager = match Manager::default_home().and_then(|home| {
                 #[cfg(unix)]
-                { Manager::open_supervised(home, std::env::current_exe()?) }
+                {
+                    Manager::open_supervised(home, std::env::current_exe()?)
+                }
                 #[cfg(not(unix))]
-                { Manager::open(home) }
+                {
+                    Manager::open(home)
+                }
             }) {
-                Ok(manager)=>manager,
+                Ok(manager) => manager,
                 Err(error) => {
-                    // Never block Tauri's main setup thread waiting for a dialog.
-                    app.state::<AtomicBool>().store(true, Ordering::SeqCst);
-                    if let Some(window)=app.get_webview_window("main"){let _=window.hide();}
-                    let handle=app.handle().clone();
-                    app.dialog().message(format!("{error}\n\nYour configuration has been preserved. Restore its backup or correct the reported problem, then reopen the app.")).title("Coding Tools MCP could not start").kind(tauri_plugin_dialog::MessageDialogKind::Error).show(move |_| handle.exit(1));
+                    startup_error(app, error);
                     return Ok(());
                 }
             };
@@ -240,11 +322,15 @@ fn main() {
             activity,
             logs,
             diagnose,
+            check_public_route,
             export_diagnostics,
             connection_config,
             auth_details,
             save_settings,
             pick_directory,
+            pick_core_executable,
+            validate_workspace_path,
+            validate_core_override,
             open_workspace,
             install_core,
             rollback_core,

@@ -139,7 +139,7 @@ pub(crate) fn wait_connected(
     let log = state.join("tunnel.log");
     let pattern = regex::Regex::new(r"https://[a-z0-9-]+\.trycloudflare\.com").unwrap();
     let deadline = Instant::now() + Duration::from_secs(25);
-    let mut public = w.public_url.clone();
+    let mut public = w.public_url.trim_end_matches('/').to_owned();
     while Instant::now() < deadline {
         if !process.alive() {
             bail!("Cloudflare process exited. See tunnel logs; local MCP remains available.");

@@ -39,6 +39,7 @@ export interface Status {
   memoryBytes: number;
   uptimeSeconds: number;
   checkedAt: string;
+  publicCheckedAt?: string | null;
   coreVersion: string;
   activityState?: "available" | "unavailable" | "unknown";
   activityMessage?: string;

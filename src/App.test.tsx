@@ -74,6 +74,7 @@ beforeEach(() => {
   invoke.mockImplementation(
     async (command: string, args?: Record<string, unknown>) => {
       if (errors[command]) throw new Error(errors[command]);
+      if (command === "validate_workspace_path") return String(args?.path);
       if (command === "snapshot") return structuredClone(snapshot);
       if (command === "activity") return structuredClone(fixtureCalls);
       if (command === "pick_directory") return "/test-fixtures/picked-project";

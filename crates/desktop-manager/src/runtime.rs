@@ -120,6 +120,26 @@ fn confirm_port_release(port: u16) -> Result<()> {
     }
 }
 
+pub fn validate_workspace_folder(input: &str) -> Result<String> {
+    let input = Path::new(input);
+    if !input.is_absolute() {
+        bail!("Enter an absolute workspace folder path");
+    }
+    let path = input
+        .canonicalize()
+        .context("Choose an existing workspace folder")?;
+    if !path.is_dir() {
+        bail!("Workspace must be a folder");
+    }
+    if path.parent().is_none() {
+        bail!("Choose a project folder, not a filesystem root");
+    }
+    Ok(path
+        .to_str()
+        .context("Workspace path must use valid UTF-8 characters")?
+        .to_owned())
+}
+
 fn validate_access(w: &Workspace, starting: bool) -> Result<()> {
     if !["local", "quick", "named", "frp"].contains(&w.access.as_str()) {
         bail!("Unknown access mode");
@@ -228,7 +248,25 @@ impl Manager {
             statuses: c
                 .workspaces
                 .iter()
-                .map(|w| self.slot(w).status.lock().unwrap().clone())
+                .map(|w| {
+                    let mut status = self.slot(w).status.lock().unwrap().clone();
+                    if status.public_state == "ready"
+                        && status
+                            .public_checked_at
+                            .as_deref()
+                            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                            .is_none_or(|time| {
+                                chrono::Utc::now().signed_duration_since(time)
+                                    >= chrono::Duration::minutes(5)
+                            })
+                    {
+                        status.public_state = "unverified".into();
+                        status.public_message =
+                            "Public discovery check expired; run diagnostics to verify the route."
+                                .into();
+                    }
+                    status
+                })
                 .collect(),
             workspaces: c.workspaces.clone(),
             settings: c.settings,
@@ -247,19 +285,11 @@ impl Manager {
             w.id = uuid::Uuid::new_v4().simple().to_string();
         }
         valid_id(&w.id)?;
-        if w.name.trim().is_empty() || w.name.chars().count() > 120 {
+        w.name = w.name.trim().to_owned();
+        if w.name.is_empty() || w.name.chars().count() > 120 {
             bail!("Enter a workspace name of 1 to 120 characters");
         }
-        let path = Path::new(&w.path)
-            .canonicalize()
-            .context("Choose an existing workspace folder")?;
-        if !path.is_dir() {
-            bail!("Workspace must be a folder");
-        }
-        w.path = path
-            .to_str()
-            .context("Workspace path must use valid UTF-8 characters")?
-            .into();
+        w.path = validate_workspace_folder(&w.path)?;
         validate_access(&w, false)?;
         if ["named", "frp"].contains(&w.access.as_str()) && !w.public_url.is_empty() {
             tunnel::validate_public_url(&w.public_url)?;
@@ -286,6 +316,16 @@ impl Manager {
         if slot.deleted.load(Ordering::SeqCst) {
             bail!("Workspace was removed; create a new workspace instead of saving a stale edit");
         }
+        let name_key = w.name.to_lowercase();
+        let old = c.workspaces.iter().find(|old| old.id == w.id);
+        if old.is_none_or(|old| old.name.trim().to_lowercase() != name_key)
+            && c.workspaces
+                .iter()
+                .any(|other| other.id != w.id && other.name.trim().to_lowercase() == name_key)
+        {
+            bail!("A workspace already has this name; choose a different name");
+        }
+        let old_port = old.map(|old| old.port);
         if w.port == 0 {
             w.port = (28766..60000)
                 .find(|p| {
@@ -319,7 +359,13 @@ impl Manager {
         }
         self.storage.save(&next)?;
         *c = next;
-        *slot.status.lock().unwrap() = Status::stopped(&w);
+        let mut status = slot.status.lock().unwrap();
+        let mut next_status = Status::stopped(&w);
+        if old_port == Some(w.port) && status.port_release_pending {
+            next_status.port_release_pending = true;
+            next_status.local_message = status.local_message.clone();
+        }
+        *status = next_status;
         Ok(w)
     }
     pub fn delete_workspace(&self, id: &str) -> Result<()> {
@@ -389,9 +435,7 @@ impl Manager {
                 s.local_message = "Starting the external Python core".into();
             });
             validate_access(&w, true)?;
-            if !Path::new(&w.path).is_dir() {
-                bail!("Workspace folder no longer exists");
-            }
+            validate_workspace_folder(&w.path)?;
             if w.port == 0 {
                 bail!("Workspace port is not configured; save the workspace to allocate it");
             }
@@ -524,6 +568,7 @@ impl Manager {
                 s.activity_message =
                     "Core startup did not finish; inspect runtime logs and retry".into();
                 s.public_endpoint.clear();
+                s.public_checked_at = None;
                 s.public_state = if session.tunnel.is_some() {
                     "error"
                 } else if w.access == "local" {
@@ -553,6 +598,7 @@ impl Manager {
         slot: &Slot,
         session: &mut Session,
     ) {
+        self.update(slot, |status| status.public_checked_at = None);
         if let Some(old) = session.tunnel.as_mut() {
             if let Err(error) = old.stop() {
                 self.update(slot, |s| {
@@ -575,13 +621,13 @@ impl Manager {
             return;
         }
         if w.access == "frp" {
-            session.public_url = w.public_url.clone();
+            session.public_url = w.public_url.trim_end_matches('/').into();
             self.update(slot, |s| {
                 s.public_state = "unverified".into();
                 s.public_message =
                     "FRP is externally managed. Run diagnostics to check its public address."
                         .into();
-                s.public_endpoint = format!("{}/mcp", w.public_url);
+                s.public_endpoint = format!("{}/mcp", w.public_url.trim_end_matches('/'));
             });
             return;
         }
@@ -608,7 +654,7 @@ impl Manager {
                         "Fixed tunnel connected. Run diagnostics to verify the public route."
                     }
                     .into();
-                    s.public_endpoint = format!("{url}/mcp");
+                    s.public_endpoint = format!("{}/mcp", url.trim_end_matches('/'));
                 });
             }
             Err(e) => {
@@ -681,6 +727,7 @@ impl Manager {
                 s.cleanup_pending = session.runtime.is_some() || session.tunnel.is_some();
                 s.port_release_pending = !s.cleanup_pending;
                 s.public_endpoint.clear();
+                s.public_checked_at = None;
                 s.public_state = if session.tunnel.is_some() {
                     "error"
                 } else if w.access == "local" {
@@ -762,6 +809,7 @@ impl Manager {
                             "Local MCP exited; public access is unavailable"
                         }.into();
                         s.public_endpoint.clear();
+                        s.public_checked_at = None;
                     });
                     continue;
                 }
@@ -799,6 +847,7 @@ impl Manager {
                             Err(error) => events::redact(&format!("Cloudflare exited but cleanup is not confirmed. Retry Stop or public access: {error:#}"), secrets),
                         };
                         s.public_endpoint.clear();
+                        s.public_checked_at = None;
                     });
                 }
             }
@@ -875,22 +924,10 @@ impl Manager {
         );
         push("Local MCP protocol", core::probe(&w, &s, false));
         if w.access != "local" {
-            let mut active = w.clone();
-            if !session.public_url.is_empty() {
-                active.public_url = session.public_url.clone();
-            }
-            let result = core::probe(&active, &s, true);
-            self.update(&slot, |status| match &result {
-                Ok(message) => {
-                    status.public_state = "ready".into();
-                    status.public_message = message.clone();
-                }
-                Err(error) => {
-                    status.public_state = "error".into();
-                    status.public_message = error.to_string();
-                }
-            });
-            push("Public discovery", result);
+            push(
+                "Public discovery",
+                self.probe_public(&w, &s, &slot, &session),
+            );
         }
         let activity_state = self.slot(&w).status.lock().unwrap().activity_state.clone();
         let records = self.activity(id)?;
@@ -910,6 +947,50 @@ impl Manager {
         }
         Ok(rows)
     }
+    fn probe_public(
+        &self,
+        w: &Workspace,
+        secrets: &Secrets,
+        slot: &Slot,
+        session: &Session,
+    ) -> Result<String> {
+        let mut active = w.clone();
+        if !session.public_url.is_empty() {
+            active.public_url = session.public_url.clone();
+        }
+        tunnel::validate_public_url(&active.public_url)?;
+        let result = core::probe(&active, secrets, true);
+        self.update(slot, |status| {
+            status.public_checked_at = Some(now());
+            match &result {
+                Ok(message) => {
+                    status.public_state = "ready".into();
+                    status.public_message = message.clone();
+                }
+                Err(error) => {
+                    status.public_state = "error".into();
+                    status.public_message = events::redact(&error.to_string(), secrets);
+                }
+            }
+        });
+        result.map_err(|error| anyhow!(events::redact(&error.to_string(), secrets)))
+    }
+
+    pub fn check_public_route(&self, id: &str) -> Result<String> {
+        let (w, _) = self.workspace(id)?;
+        let slot = self.slot(&w);
+        let session = slot
+            .session
+            .try_lock()
+            .map_err(|_| anyhow!("Workspace operation is in progress"))?;
+        self.ensure_active()?;
+        let (w, secrets) = self.workspace(id)?;
+        if w.access == "local" {
+            bail!("Local access only");
+        }
+        self.probe_public(&w, &secrets, &slot, &session)
+    }
+
     pub fn export_diagnostics(&self, id: &str) -> Result<String> {
         let (w, _) = self.workspace(id)?;
         let slot = self.slot(&w);
@@ -972,12 +1053,13 @@ impl Manager {
             .try_lock()
             .map_err(|_| anyhow!("Core installation is already in progress"))?;
         self.ensure_active()?;
-        let path = core::install(&self.storage, version)?;
+        let (path, pending) = core::install(&self.storage, version)?;
         let mut c = self.config.lock().unwrap();
         let mut n = c.clone();
         n.previous_core = n.managed_core.clone();
         n.managed_core = Some(path);
         self.storage.save(&n)?;
+        let _ = pending.keep();
         *c = n;
         Ok(format!("Core {version} installed and verified. Running workspaces keep their current core until restarted."))
     }
@@ -1124,6 +1206,62 @@ mod admission_regressions {
         vec![executable.to_string_lossy().into(), "-c".into(), script]
     }
 
+    #[test]
+    fn workspace_names_are_unique_on_create_and_rename() {
+        let (_directory, manager, original) = fixture();
+        let mut other = original.clone();
+        other.id.clear();
+        other.port = 0;
+        other.name = format!(" {} ", original.name.to_uppercase());
+        assert!(manager.save_workspace(other.clone(), None).is_err());
+        other.name = "测试工作区".into();
+        let mut other = manager.save_workspace(other, None).unwrap();
+        assert_eq!(other.name, "测试工作区");
+        other.name = original.name;
+        assert!(manager.save_workspace(other, None).is_err());
+    }
+
+    #[test]
+    fn accepts_existing_absolute_project_but_not_the_volume_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().ancestors().last().unwrap();
+        assert!(validate_workspace_folder(directory.path().to_str().unwrap()).is_ok());
+        assert!(validate_workspace_folder(root.to_str().unwrap()).is_err());
+        assert!(validate_workspace_folder("relative-project").is_err());
+    }
+
+    #[test]
+    fn warns_until_a_public_discovery_check_is_fresh() {
+        let (_directory, manager, workspace) = fixture();
+        let slot = manager.slot(&workspace);
+        manager.update(&slot, |state| {
+            state.public_state = "ready".into();
+            state.public_checked_at = Some("2000-01-01T00:00:00Z".into());
+        });
+        assert_eq!(manager.snapshot().statuses[0].public_state, "unverified");
+        manager.update(&slot, |state| state.public_checked_at = Some(now()));
+        assert_eq!(manager.snapshot().statuses[0].public_state, "ready");
+    }
+
+    #[test]
+    fn preserves_pending_port_warning_only_for_the_same_port() {
+        let (_directory, manager, mut workspace) = fixture();
+        let slot = manager.slot(&workspace);
+        manager.update(&slot, |state| {
+            state.port_release_pending = true;
+            state.local_message = "Port release unverified".into();
+        });
+        workspace.name.push_str(" renamed");
+        let mut workspace = manager.save_workspace(workspace, None).unwrap();
+        assert!(manager.snapshot().statuses[0].port_release_pending);
+        workspace.port = if workspace.port == 65000 {
+            64999
+        } else {
+            65000
+        };
+        manager.save_workspace(workspace, None).unwrap();
+        assert!(!manager.snapshot().statuses[0].port_release_pending);
+    }
     #[test]
     fn failed_start_clears_stale_runtime_and_public_readiness() {
         let (_directory, manager, mut workspace) = fixture();

@@ -153,6 +153,8 @@ pub struct Status {
     pub memory_bytes: u64,
     pub uptime_seconds: u64,
     pub checked_at: String,
+    #[serde(default)]
+    pub public_checked_at: Option<String>,
     pub core_version: String,
     pub activity_state: String,
     pub activity_message: String,
@@ -185,6 +187,7 @@ impl Status {
             memory_bytes: 0,
             uptime_seconds: 0,
             checked_at: now(),
+            public_checked_at: None,
             core_version: w.core_version.clone(),
             activity_state: "unknown".into(),
             activity_message: "Start the core to check tool-call history support".into(),

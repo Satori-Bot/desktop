@@ -5,7 +5,7 @@ A local-first **Rust + Tauri 2** application with a **React, TypeScript and Mant
 ## First run
 
 1. Install a native desktop bundle, or build one below.
-2. Open **Settings → Install core** to create a private, versioned environment for the exact published Python core. This requires [uv](https://docs.astral.sh/uv/getting-started/installation/). You can instead select an existing official core executable and separate argument list.
+2. Choose **Install recommended Core** in Settings, or **Use existing Core** in the new workspace wizard. Managed installation requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and network access. It requests Python 3.11; uv can fetch a suitable interpreter if none is present.
 3. Add a workspace folder. **Local only** is the default; no tunnel or account is needed.
 4. Start it and copy its MCP connection configuration. Local and public health are shown independently.
 
@@ -92,6 +92,10 @@ CI covers Linux/macOS/Windows manager/native builds, Python packaging, frontend 
 - `mcp_desktop_client`: compatibility package preserving `coding-tools-mcp-desktop` and `mcp_desktop_client.app:main`. It launches an already installed native executable and never downloads software. `pip install` alone does not install a GUI. Set `CODING_TOOLS_MCP_DESKTOP_BINARY` to a native executable if discovery cannot find it.
 
 Configuration lives in `~/.coding-tools-mcp-desktop/desktop-v2.json`. On Unix the private directory uses mode 0700 and files use 0600; Windows uses the user's profile ACL. Existing v1 profiles/secrets are backed up before migration and originals are retained. Invalid/future configuration fails with a useful error rather than resetting workspaces. Old running processes are never adopted by PID or killed: stop them in the old app before starting the migrated workspace.
+
+Managed cores live under `~/.coding-tools-mcp-desktop/cores/<version>-<id>/` (under the user profile on Windows). Uninstalling the desktop app does not delete these environments or your workspace configuration. uv's Python installations and caches are separate. Do not remove a managed environment while it is in use or selected for rollback; an existing external runtime is never removed by the desktop app.
+
+Configuration saves keep the previous valid `desktop-v2.json.bak` with the same access restrictions as the main file. If startup detects a damaged main file and a valid backup, the recovery dialog can restore the backup while retaining the damaged original.
 
 Closing the window hides it in the tray by default. **Stop** cleans up only owned processes and checks port release. An unconfirmed port check stays visible, with retry or safe port editing available after owned cleanup. **Stop services and quit** requires owned-process cleanup; an unrelated listener does not prevent quitting. Crashes are detected, and retry/restart is explicit. Running workspaces cannot be reconfigured. Managed core installation verifies a new version before selecting it; failure leaves the prior environment selected. Rollback changes the selected environment without interrupting running workspaces.
 

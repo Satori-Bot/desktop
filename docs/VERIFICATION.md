@@ -138,3 +138,17 @@ This is process lifecycle management, not a security sandbox. Deliberately detac
 - Interactive managed-core install/rollback on each target OS remains manual. The real Linux headless install/rollback/offline-failure flow passed above; other boundary and concurrency checks also use local fixtures.
 - No live Cloudflare login, certificate grant, tunnel, DNS route or token was exercised. Live validation needs an explicitly approved account/route; local cloudflared fixtures test failure and recovery safely.
 - This cloud host cannot launch local Chromium (`socket() EPERM`) or supply WebKit's compiled-in system-helper path. Hosted browser/native evidence above is genuine; local screenshots were not invented or substituted.
+
+
+## Windows silent installation release gate
+
+Native bundle jobs validate that MSI and NSIS are built; they do not prove either
+installer completes. For each artifact intended for release, test the exact
+artifact in a clean Windows VM and record its checksum, Windows version, install
+scope, elapsed time, and exit code. For MSI, collect a verbose Windows Installer
+log (for example with `/L*V`) with a bounded timeout and keep the log if the process
+hangs. Verify the expected executable is installed, first launch succeeds, and
+uninstall completes. Note whether WebView2 is already present; test a machine
+without it as well if supported by that installer. A passing NSIS run does not
+clear the MSI gate. Do not publish MSI until the quiet install regression is
+reproduced/diagnosed and the corrected artifact passes.

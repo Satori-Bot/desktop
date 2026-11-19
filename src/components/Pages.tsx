@@ -258,15 +258,38 @@ export function ConnectionsPage({
                 color="orange"
                 variant="light"
                 disabled={!!busy || status?.state !== "running"}
-                loading={busy === "retry-tunnel"}
-                onClick={() =>
-                  void run("retry-tunnel", () => api.retryTunnel(workspace.id))
+                loading={
+                  busy ===
+                  (workspace.access === "frp" ? "diagnose" : "retry-tunnel")
                 }
+                onClick={() => {
+                  if (workspace.access === "frp") {
+                    void run(
+                      "diagnose",
+                      () => api.checkPublicRoute(workspace.id),
+                      t("Public discovery is reachable"),
+                    );
+                  } else {
+                    void run("retry-tunnel", () =>
+                      api.retryTunnel(workspace.id),
+                    );
+                  }
+                }}
               >
-                {t("Retry tunnel")}
+                {t(
+                  workspace.access === "frp"
+                    ? "Check public address"
+                    : "Retry tunnel",
+                )}
               </Button>
             )}
           </Group>
+          {status?.publicCheckedAt && (
+            <Text c="dimmed" size="xs" mt="xs">
+              {t("Last public discovery check")}:{" "}
+              {new Date(status.publicCheckedAt).toLocaleString()}
+            </Text>
+          )}
           {status?.publicEndpoint && configWarning(status, true, t) && (
             <Alert color="yellow" mt="sm">
               {configWarning(status, true, t)}
@@ -634,16 +657,32 @@ export function ActivityPage({
 }
 export function DiagnosticsPage({
   workspace,
+  status,
   run,
   busy,
   t,
 }: {
   workspace: Workspace;
+  status?: Status;
   run: RunAction;
   busy: string;
   t: Translate;
 }) {
-  const [checks, setChecks] = useState<Diagnostic[] | null>(null);
+  const signature = JSON.stringify([
+    workspace,
+    status?.pid,
+    status?.state,
+    status?.localState,
+  ]);
+  const [lastCheck, setLastCheck] = useState<{
+    rows: Diagnostic[];
+    signature: string;
+    at: number;
+  } | null>(null);
+  const checks = lastCheck?.rows ?? null;
+  const stale =
+    lastCheck !== null &&
+    (signature !== lastCheck.signature || Date.now() - lastCheck.at >= 300_000);
   const [kind, setKind] = useState<"runtime" | "tunnel">("runtime");
   const [logs, setLogs] = useState("");
   const cursor = useRef(0);
@@ -702,7 +741,7 @@ export function DiagnosticsPage({
   }, [kind, workspace.id]);
   async function diagnose() {
     const result = await run("diagnose", () => api.diagnose(workspace.id));
-    if (result) setChecks(result);
+    if (result) setLastCheck({ rows: result, signature, at: Date.now() });
   }
   async function exportReport() {
     await run(
@@ -764,10 +803,23 @@ export function DiagnosticsPage({
           />
         ) : (
           <div className="diagnostic-list">
+            {lastCheck && (
+              <Text size="sm" c={stale ? "yellow" : "dimmed"}>
+                {t(
+                  stale
+                    ? "Previous checks are stale. Run checks again."
+                    : "Last diagnostics check",
+                )}
+                {": "}
+                {new Date(lastCheck.at).toLocaleString()}
+              </Text>
+            )}
             {checks.map((item, index) => (
               <div key={`${item.name}-${index}`} className="diagnostic-row">
-                <div className={`diagnostic-icon ${item.level}`}>
-                  {item.level === "ok" ? (
+                <div
+                  className={`diagnostic-icon ${stale ? "warning" : item.level}`}
+                >
+                  {!stale && item.level === "ok" ? (
                     <CheckCircle2 size={19} />
                   ) : (
                     <AlertCircle size={19} />
@@ -784,20 +836,24 @@ export function DiagnosticsPage({
                 <Badge
                   ml="auto"
                   color={
-                    item.level === "ok"
-                      ? "teal"
-                      : item.level === "error"
-                        ? "red"
-                        : "yellow"
+                    stale
+                      ? "gray"
+                      : item.level === "ok"
+                        ? "teal"
+                        : item.level === "error"
+                          ? "red"
+                          : "yellow"
                   }
                   variant="light"
                 >
                   {t(
-                    item.level === "ok"
-                      ? "Ready"
-                      : item.level === "error"
-                        ? "Error"
-                        : "Warning",
+                    stale
+                      ? "Stale"
+                      : item.level === "ok"
+                        ? "Ready"
+                        : item.level === "error"
+                          ? "Error"
+                          : "Warning",
                   )}
                 </Badge>
               </div>
@@ -907,8 +963,8 @@ export function SettingsPage({
     );
     if (pageActive.current && result) setDraft(result);
   }
-  async function install() {
-    const exactVersion = version.trim();
+  async function install(value = version) {
+    const exactVersion = value.trim();
     // Match the manager's published-version contract before invoking IPC.
     if (!/^\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?$/.test(exactVersion)) {
       setValidation(t("Enter an exact version, for example 0.5.0."));
@@ -1031,6 +1087,13 @@ export function SettingsPage({
             "Published core 0.5.0 supports launch and connections, but does not expose per-tool-call history. History requires an event-capable official core.",
           )}
         </Alert>
+        <Button
+          mb="md"
+          onClick={() => void install("0.5.0")}
+          disabled={!available || !!maintenanceBusy}
+        >
+          {t("Install recommended Core")} (0.5.0)
+        </Button>
         <div className="core-install">
           <TextInput
             label={t("Version to install")}
@@ -1090,7 +1153,7 @@ export function SettingsPage({
             {t(output)}
           </Alert>
         )}
-        {(coreAvailable || workspace?.coreCommand.length) && (
+        {available && (
           <Button mt="md" onClick={onContinue} disabled={anyBusy}>
             {t(workspace ? "Back to workspace" : "Create your first workspace")}
           </Button>
@@ -1180,6 +1243,7 @@ function RuntimeOverride({
     await run(
       "save-runtime",
       async () => {
+        await api.validateCoreOverride(workspace.path, command);
         const saved = await api.saveWorkspace({
           ...workspace,
           coreCommand: command,

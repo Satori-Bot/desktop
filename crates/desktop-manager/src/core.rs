@@ -125,10 +125,36 @@ fn workspace_program(program: &str, directory: &Path) -> Result<PathBuf> {
     }
     Ok(path)
 }
+
+/// Validate an explicit override without executing user-selected software.
+pub fn validate_override(args: &[String], directory: &Path) -> Result<()> {
+    let Some(program) = args.first() else {
+        return Ok(());
+    };
+    if program.trim().is_empty() || args.iter().any(|arg| arg.contains('\0')) {
+        bail!("Enter a valid core executable and arguments");
+    }
+    let candidate = workspace_program(program, directory)?;
+    let found = if candidate.is_absolute() {
+        is_executable_file(&candidate)
+    } else {
+        find_program(program).is_some()
+    };
+    if !found {
+        bail!("The selected core executable was not found or is not executable");
+    }
+    Ok(())
+}
 pub fn resolve(w: &Workspace, config: &Config) -> Result<Vec<String>> {
     if !w.core_command.is_empty() {
         let mut command = w.core_command.clone();
-        command[0] = workspace_program(&command[0], Path::new(&w.path))?
+        let resolved = workspace_program(&command[0], Path::new(&w.path))?;
+        let resolved = if resolved.is_absolute() {
+            resolved
+        } else {
+            find_program(&command[0]).unwrap_or(resolved)
+        };
+        command[0] = resolved
             .to_str()
             .context("Core executable path must use valid UTF-8 characters")?
             .into();
@@ -232,7 +258,7 @@ fn probe_json(response: reqwest::blocking::Response) -> Result<Value> {
 }
 pub fn probe(w: &Workspace, secrets: &Secrets, public: bool) -> Result<String> {
     let base = if public {
-        w.public_url.clone()
+        w.public_url.trim_end_matches('/').to_owned()
     } else {
         format!("http://127.0.0.1:{}", w.port)
     };
@@ -318,7 +344,7 @@ pub fn version_output(args: &[String], dir: &Path) -> Result<String> {
     }
     Ok(text)
 }
-pub fn install(storage: &Storage, version: &str) -> Result<String> {
+pub fn install(storage: &Storage, version: &str) -> Result<(String, tempfile::TempDir)> {
     if !regex::Regex::new(r"^\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?$")
         .unwrap()
         .is_match(version)
@@ -326,11 +352,14 @@ pub fn install(storage: &Storage, version: &str) -> Result<String> {
         bail!("Enter an exact published version such as 0.5.0");
     }
     let uv=find_program("uv").context("uv was not found in PATH or standard user/Homebrew locations. Install uv from https://docs.astral.sh/uv/getting-started/installation/ before installing a managed core")?;
-    let env = storage
-        .home
-        .join("cores")
-        .join(format!("{version}-{}", uuid::Uuid::new_v4().simple()));
-    private_dir(&env)?;
+    let cores = storage.home.join("cores");
+    private_dir(&cores)?;
+    // The venv must be built at its final path; console scripts can embed it.
+    // Keep the cleanup guard until the manager has persisted the selection.
+    let pending = tempfile::Builder::new()
+        .prefix(&format!("{version}-"))
+        .tempdir_in(cores)?;
+    let env = pending.path().to_path_buf();
     let python = env.join(if cfg!(windows) {
         "Scripts/python.exe"
     } else {
@@ -362,11 +391,28 @@ pub fn install(storage: &Storage, version: &str) -> Result<String> {
             thread::sleep(Duration::from_millis(100));
         }
         if process.alive() {
-            process.stop()?;
+            if let Err(error) = process.stop() {
+                // Never remove an environment a retained child may still be using.
+                let retained = pending.keep();
+                return Err(error).with_context(|| {
+                    format!(
+                        "Core installation could not be stopped; retained {}",
+                        retained.display()
+                    )
+                });
+            }
             bail!("Installation timed out; previous core remains selected. See core-install.log.");
         }
         let success = process.succeeded();
-        process.stop()?;
+        if let Err(error) = process.stop() {
+            let retained = pending.keep();
+            return Err(error).with_context(|| {
+                format!(
+                    "Core installation cleanup is incomplete; retained {}",
+                    retained.display()
+                )
+            });
+        }
         if !success {
             bail!("Installation failed; previous core remains selected. See core-install.log.");
         }
@@ -377,7 +423,7 @@ pub fn install(storage: &Storage, version: &str) -> Result<String> {
     if reported_version(&output) != Some(version) {
         bail!("New core reported a different version than requested {version}; previous core remains selected");
     }
-    Ok(path)
+    Ok((path, pending))
 }
 
 #[cfg(test)]

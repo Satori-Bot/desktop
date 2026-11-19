@@ -5,7 +5,7 @@ All Tauri commands return JSON or reject with a human-readable error string. Rus
 Types (camelCase):
 - Workspace: { id: string, name: string, path: string, port: number, access: 'local'|'quick'|'named'|'frp', publicUrl: string, auth: 'noauth'|'bearer'|'oauth', permissionMode: 'safe'|'trusted', coreCommand: string[], coreVersion: string, tunnelName: string, credentialsFile: string, tokenConfigured: boolean }
 - Settings: { language: 'en'|'zh', closeToTray: boolean }
-- Status: { workspaceId: string, state: 'stopped'|'starting'|'running'|'error'|'stopping', pid: number|null, cleanupPending: boolean, portReleasePending: boolean, localState: string, publicState: string, localMessage: string, publicMessage: string, localEndpoint: string, publicEndpoint: string, cpuPercent: number, memoryBytes: number, uptimeSeconds: number, checkedAt: string, coreVersion: string, activityState: 'available'|'unavailable'|'unknown', activityMessage: string }
+- Status: { workspaceId: string, state: 'stopped'|'starting'|'running'|'error'|'stopping', pid: number|null, cleanupPending: boolean, portReleasePending: boolean, localState: string, publicState: string, localMessage: string, publicMessage: string, localEndpoint: string, publicEndpoint: string, cpuPercent: number, memoryBytes: number, uptimeSeconds: number, checkedAt: string, publicCheckedAt: string|null, coreVersion: string, activityState: 'available'|'unavailable'|'unknown', activityMessage: string }
 - Activity: { id: string, tool: string, startedAt: string, finishedAt: string|null, outcome: string, durationMs: number|null, errorCategory: string|null, runtimeId: string }
 - Snapshot: { workspaces: Workspace[], statuses: Status[], settings: Settings, migrationNotice: string|null, coreAvailable: boolean, cloudflaredAvailable: boolean }
 - Diagnostic: { level: 'ok'|'warning'|'error', name: string, message: string }
@@ -19,10 +19,13 @@ Commands:
 - activity({ id }) -> Activity[] (latest 200 calls, newest first)
 - logs({ id, kind: 'runtime'|'tunnel', cursor: number }) -> Logs (bounded incremental cursor; cursor 0 gives tail)
 - diagnose({ id }) -> Diagnostic[]
+- check_public_route({ id }) -> string (public discovery only; does not run a local executable or send stored credentials)
 - export_diagnostics({ id }) -> string (redacted JSON text; UI can download it with a Blob)
 - connection_config({ id, public: boolean }) -> string (JSON configuration; explicit copy/show action only, may contain bearer token)
 - save_settings({ settings: Settings }) -> Settings
-- pick_directory() -> string|null (native dialog)
+- pick_directory() / pick_core_executable() -> string|null (native dialogs)
+- validate_workspace_path({ path }) -> string (canonical existing absolute non-root directory)
+- validate_core_override({ path, args }) -> null (check executable without running it)
 - open_workspace({ id }) -> null
 - install_core({ version: string }) -> string (uses uv to install exactly coding-tools-mcp==VERSION in versioned private venv, probes it before switching; UI explicit Install button)
 - rollback_core() -> string (switch to previous verified environment, does not restart running services)

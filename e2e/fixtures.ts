@@ -68,6 +68,7 @@ export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
               setTimeout(resolve, delays[command]),
             );
           if (state.errors[command]) throw state.errors[command];
+          if (command === "validate_workspace_path") return String(args?.path);
           if (command === "snapshot") return structuredClone(state.snapshot);
           if (command === "activity") return structuredClone(initialCalls);
           if (command === "pick_directory")

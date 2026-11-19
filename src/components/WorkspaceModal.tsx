@@ -7,13 +7,13 @@ import {
   Divider,
   Group,
   Modal,
-  NumberInput,
   SegmentedControl,
   Select,
   Stack,
   Stepper,
   Text,
   TextInput,
+  Textarea,
   Title,
 } from "@mantine/core";
 import {
@@ -69,13 +69,26 @@ export function WorkspaceModal({
   const [draft, setDraft] = useState<Workspace>(() =>
     workspace ? { ...workspace } : blankWorkspace(),
   );
+  const [portText, setPortText] = useState(() =>
+    draft.port === 0 ? "" : String(draft.port),
+  );
+  const [showCore, setShowCore] = useState(false);
+  const [corePath, setCorePath] = useState("");
+  const [coreArgs, setCoreArgs] = useState("");
+  const override =
+    showCore && corePath.trim()
+      ? [
+          corePath.trim(),
+          ...coreArgs.split("\n").filter((arg) => arg.length > 0),
+        ]
+      : draft.coreCommand;
   const [secrets, setSecrets] = useState<Secrets>({});
   const [step, setStep] = useState(0);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
   const edit = !!workspace;
-  const needsCore = !coreAvailable && draft.coreCommand.length === 0;
+  const needsCore = !coreAvailable && override.length === 0;
   const update = (patch: Partial<Workspace>) =>
     setDraft((d) => ({ ...d, ...patch }));
   async function browse() {
@@ -98,9 +111,40 @@ export function WorkspaceModal({
       if (pageActive.current) setBusy(false);
     }
   }
+  async function browseCore() {
+    if (!pageActive.current || lock.current || locked) return;
+    lock.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      const path = await api.pickCoreExecutable();
+      if (pageActive.current && path) setCorePath(path);
+    } catch (e) {
+      if (pageActive.current) setError(t(errorText(e)));
+    } finally {
+      lock.current = false;
+      if (pageActive.current) setBusy(false);
+    }
+  }
   async function save(start: boolean) {
     if (!pageActive.current || lock.current || locked) return;
-    if (!edit && needsCore) return;
+    if (start && needsCore) return;
+    const port = portText.trim() === "" ? 0 : Number(portText);
+    if (
+      portText.trim() !== "" &&
+      (!/^\d+$/.test(portText.trim()) || port < 1 || port > 65535)
+    ) {
+      setError(
+        t(
+          "Enter a whole port number from 1 to 65535, or leave blank for automatic.",
+        ),
+      );
+      return;
+    }
+    if (showCore && !corePath.trim() && (start || coreArgs.trim())) {
+      setError(t("Enter an existing core executable."));
+      return;
+    }
     const invalid = validate(draft, t);
     if (invalid) {
       setError(invalid);
@@ -110,8 +154,16 @@ export function WorkspaceModal({
     setBusy(true);
     setError("");
     try {
+      if (showCore && corePath.trim())
+        await api.validateCoreOverride(draft.path, override);
       const saved = await api.saveWorkspace(
-        { ...draft, name: draft.name.trim(), path: draft.path.trim() },
+        {
+          ...draft,
+          name: draft.name.trim(),
+          path: draft.path.trim(),
+          port,
+          coreCommand: override,
+        },
         secrets,
       );
       if (!pageActive.current) return;
@@ -137,10 +189,28 @@ export function WorkspaceModal({
       lock.current = false;
     }
   }
-  function next() {
-    if (step === 0 && (!draft.name.trim() || !draft.path.trim())) {
-      setError(t("Name and folder are required."));
-      return;
+  async function next() {
+    if (step === 0) {
+      if (!draft.name.trim() || !draft.path.trim()) {
+        setError(t("Name and folder are required."));
+        return;
+      }
+      if (backendAvailable()) {
+        if (lock.current) return;
+        lock.current = true;
+        setBusy(true);
+        try {
+          const path = await api.validateWorkspacePath(draft.path.trim());
+          if (!pageActive.current) return;
+          update({ path });
+        } catch (e) {
+          if (pageActive.current) setError(t(errorText(e)));
+          return;
+        } finally {
+          lock.current = false;
+          if (pageActive.current) setBusy(false);
+        }
+      }
     }
     const invalid = step === 1 ? validate(draft, t) : null;
     if (invalid) {
@@ -176,7 +246,10 @@ export function WorkspaceModal({
       />
       <TextInput
         label={t("Folder path")}
-        placeholder="/Users/you/projects/my-project"
+        placeholder={t("Choose or enter an absolute folder path")}
+        autoCapitalize="off"
+        autoCorrect="off"
+        spellCheck={false}
         value={draft.path}
         onChange={(e) => update({ path: e.currentTarget.value })}
         disabled={busy || locked}
@@ -347,14 +420,13 @@ export function WorkspaceModal({
         </Text>
       </div>
       {edit && (
-        <NumberInput
+        <TextInput
           label={t("Port")}
-          description={t("0 selects an available port")}
-          min={0}
-          max={65535}
-          allowDecimal={false}
-          value={draft.port}
-          onChange={(v) => update({ port: Number(v) || 0 })}
+          placeholder={t("Automatic")}
+          description={t("Leave blank to choose an available port.")}
+          inputMode="numeric"
+          value={portText}
+          onChange={(event) => setPortText(event.currentTarget.value)}
           disabled={busy || locked}
         />
       )}
@@ -373,12 +445,57 @@ export function WorkspaceModal({
       withCloseButton={!busy}
     >
       <Stack gap="lg">
-        {needsCore && (
-          <Alert color="orange" title={t("Core installation required")}>
-            {t("Install Core before creating and starting a workspace.")}
-            <Button size="xs" ml="sm" onClick={onInstallCore} disabled={busy}>
-              {t("Install core")}
-            </Button>
+        {!edit && (!coreAvailable || showCore) && (
+          <Alert
+            color="orange"
+            title={t("Choose a Core to start this workspace")}
+          >
+            <Group>
+              <Button size="xs" onClick={onInstallCore} disabled={busy}>
+                {t("Install core")}
+              </Button>
+              <Button
+                size="xs"
+                variant="default"
+                onClick={() => setShowCore(!showCore)}
+                disabled={busy}
+              >
+                {t("Use existing Core")}
+              </Button>
+            </Group>
+            {showCore && (
+              <Stack mt="sm" gap="xs">
+                <TextInput
+                  label={t("Existing core executable")}
+                  value={corePath}
+                  onChange={(event) => setCorePath(event.currentTarget.value)}
+                  rightSectionWidth={92}
+                  rightSection={
+                    <Button
+                      size="compact-xs"
+                      variant="subtle"
+                      disabled={busy || !backendAvailable()}
+                      onClick={() => void browseCore()}
+                    >
+                      {t("Browse")}
+                    </Button>
+                  }
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  disabled={busy}
+                />
+                <Textarea
+                  label={t("Arguments (one per line)")}
+                  value={coreArgs}
+                  onChange={(event) => setCoreArgs(event.currentTarget.value)}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  disabled={busy}
+                />
+              </Stack>
+            )}
           </Alert>
         )}
         {locked && (
@@ -405,11 +522,6 @@ export function WorkspaceModal({
               icon={<Check size={15} />}
             />
           </Stepper>
-        )}
-        {error && (
-          <Alert color="red" icon={<AlertCircle size={17} />} role="alert">
-            {error}
-          </Alert>
         )}
         {edit ? (
           <>
@@ -469,6 +581,11 @@ export function WorkspaceModal({
           <Text>{t("Workspace created")}</Text>
         )}
         <Divider />
+        {error && (
+          <Alert color="red" icon={<AlertCircle size={17} />} role="alert">
+            {error}
+          </Alert>
+        )}
         <Group justify="space-between">
           <Button
             variant="subtle"
@@ -501,7 +618,7 @@ export function WorkspaceModal({
               </Button>
             ) : step < 2 ? (
               <Button
-                onClick={next}
+                onClick={() => void next()}
                 rightSection={<ArrowRight size={15} />}
                 disabled={busy || locked}
               >
@@ -511,7 +628,7 @@ export function WorkspaceModal({
               <>
                 <Button
                   variant="default"
-                  disabled={busy || locked || needsCore || !backendAvailable()}
+                  disabled={busy || locked || !backendAvailable()}
                   onClick={() => save(false)}
                 >
                   {t("Create workspace")}

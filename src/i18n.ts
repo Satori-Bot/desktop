@@ -353,6 +353,31 @@ const zh: Record<string, string> = {
   "Connect a client": "连接客户端",
   "Use the local endpoint or copy the client configuration. Public access is optional.":
     "使用本地端点或复制客户端配置。公网访问为可选项。",
+  "Set up a Core before starting a workspace.": "请先配置核心，再启动工作区。",
+  "Install recommended Core": "安装推荐版本",
+  "Choose a Core to start this workspace": "选择用于启动工作区的核心",
+  "Use existing Core": "使用已有核心",
+  "Enter an existing core executable.": "请输入已有核心的可执行文件。",
+  "The selected core executable was not found or is not executable":
+    "找不到所选核心，或文件不可执行。",
+  "Enter an absolute workspace folder path": "请输入工作区目录的绝对路径。",
+  "Choose a project folder, not a filesystem root":
+    "请选择项目目录，而不是磁盘根目录。",
+  "Choose or enter an absolute folder path": "选择或输入绝对目录路径",
+  "Enter a whole port number from 1 to 65535, or leave blank for automatic.":
+    "请输入 1 到 65535 的整数端口，或留空自动选择。",
+  "Leave blank to choose an available port.": "留空时自动选择可用端口。",
+  "A workspace already has this name; choose a different name":
+    "工作区名称已存在，请换一个名称。",
+  "Public discovery check expired; run diagnostics to verify the route.":
+    "公网验证已过期，请运行诊断重新检查。",
+  "Previous checks are stale. Run checks again.":
+    "上次检查已过期，请重新检查。",
+  "Last diagnostics check": "上次诊断检查",
+  Stale: "已过期",
+  "Check public address": "检查公网地址",
+  "Last public discovery check": "上次公网探测",
+  "Public discovery is reachable": "公网探测可达",
   Saved: "已保存",
   "Operation completed": "操作已完成",
   "Working…": "处理中…",

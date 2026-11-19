@@ -316,10 +316,6 @@ export default function App() {
     setFeedback(null);
   }
   function openEditor(workspace: Workspace | null) {
-    if (!workspace && missingCore) {
-      navigate("Settings");
-      return;
-    }
     if (!workspace) navigate("Dashboard");
     if (!workspace && workspaceModal === null) return;
     editorSaved.current = false;
@@ -440,7 +436,14 @@ export default function App() {
             data={
               snapshot?.workspaces.map((w) => ({
                 value: w.id,
-                label: w.name,
+                label: snapshot.workspaces.some(
+                  (other) =>
+                    other.id !== w.id &&
+                    other.name.trim().toLowerCase() ===
+                      w.name.trim().toLowerCase(),
+                )
+                  ? `${w.name} · ${w.path} (${w.id.slice(0, 8)})`
+                  : w.name,
               })) ?? []
             }
             disabled={
@@ -613,7 +616,7 @@ export default function App() {
               icon={<CircleAlert size={18} />}
               title={t("Core installation required")}
             >
-              {t("Install Core before creating and starting a workspace.")}
+              {t("Set up a Core before starting a workspace.")}
               <Button ml="sm" size="xs" onClick={installCore}>
                 {t("Install core")}
               </Button>
@@ -667,15 +670,9 @@ export default function App() {
                   leftSection={<Plus size={18} />}
                   rightSection={<ArrowRight size={17} />}
                   disabled={busy || (available && !snapshot)}
-                  onClick={() =>
-                    missingCore ? installCore() : openEditor(null)
-                  }
+                  onClick={() => openEditor(null)}
                 >
-                  {t(
-                    missingCore
-                      ? "Install core"
-                      : "Create your first workspace",
-                  )}
+                  {t("Create your first workspace")}
                 </Button>
               </div>
               <div className="welcome-steps">
@@ -1027,6 +1024,7 @@ export default function App() {
               ) : page === "Diagnostics" ? (
                 <DiagnosticsPage
                   key={workspace.id}
+                  status={status}
                   workspace={workspace}
                   run={runWorkspace}
                   busy={workspaceBusy}

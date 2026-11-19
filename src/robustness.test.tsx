@@ -35,6 +35,7 @@ const count = (command: string) =>
 async function defaultInvoke(command: string, args?: Record<string, unknown>) {
   if (command === "snapshot") return structuredClone(snapshot);
   if (command === "activity") return structuredClone(fixtureCalls);
+  if (command === "validate_workspace_path") return String(args?.path);
   if (command === "logs")
     return { text: "Initial log output\n", cursor: 10, truncated: false };
   if (command === "connection_config") return "private fixture config";
@@ -840,7 +841,9 @@ describe("saved drafts and accessible history", () => {
     fireEvent.change(screen.getByLabelText("Folder path", { exact: false }), {
       target: { value: "/fixture/new" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Continue" })),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     fireEvent.click(screen.getByRole("button", { name: "Create and start" }));
     expect(count("save_workspace")).toBe(1);
@@ -1037,7 +1040,9 @@ describe("saved drafts and accessible history", () => {
     fireEvent.change(screen.getByLabelText("Folder path", { exact: false }), {
       target: { value: "/fixture/created" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Continue" })),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     const restore = vi.spyOn(opener, "focus");
     await act(async () =>
