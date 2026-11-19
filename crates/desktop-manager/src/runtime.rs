@@ -182,6 +182,21 @@ impl Manager {
         supervisor: Option<PathBuf>,
         bundled_uv: Option<PathBuf>,
     ) -> Result<Arc<Self>> {
+        let manager = Arc::new(Self::load(home, supervisor, bundled_uv)?);
+        let weak = Arc::downgrade(&manager);
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_secs(2));
+            let Some(m) = weak.upgrade() else { break };
+            m.refresh();
+        });
+        Ok(manager)
+    }
+
+    fn load(
+        home: PathBuf,
+        supervisor: Option<PathBuf>,
+        bundled_uv: Option<PathBuf>,
+    ) -> Result<Self> {
         if supervisor
             .as_ref()
             .is_some_and(|path| !path.is_absolute() || !core::is_executable_file(path))
@@ -190,7 +205,7 @@ impl Manager {
         }
         let storage = Storage::open(home)?;
         let (config, migration_notice) = storage.load()?;
-        let manager = Arc::new(Self {
+        Ok(Self {
             storage,
             config: Mutex::new(config),
             slots: Mutex::new(HashMap::new()),
@@ -199,14 +214,7 @@ impl Manager {
             supervisor,
             bundled_uv,
             shutting_down: AtomicBool::new(false),
-        });
-        let weak = Arc::downgrade(&manager);
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(2));
-            let Some(m) = weak.upgrade() else { break };
-            m.refresh();
-        });
-        Ok(manager)
+        })
     }
     pub fn default_home() -> Result<PathBuf> {
         Ok(dirs::home_dir()
@@ -1250,7 +1258,9 @@ mod admission_regressions {
 
     fn fixture() -> (tempfile::TempDir, Arc<Manager>, Workspace) {
         let directory = tempfile::tempdir().unwrap();
-        let manager = Manager::open(directory.path().join("home")).unwrap();
+        // These tests control admission and refresh ordering explicitly. The
+        // periodic health check would introduce a third contender for the slot.
+        let manager = Arc::new(Manager::load(directory.path().join("home"), None, None).unwrap());
         let workspace: Workspace = serde_json::from_value(json!({
             "id":"1234567890abcdef1234567890abcdef",
             "name":"Admission fixture",
@@ -1555,19 +1565,24 @@ mod admission_regressions {
         let workspace = manager.save_workspace(workspace, None).unwrap();
         let diagnosing = manager.clone();
         let handle = thread::spawn(move || diagnosing.diagnose(&workspace.id));
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while !marker.exists() && Instant::now() < deadline {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !marker.exists() && !handle.is_finished() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
         let observed_probe = marker.exists();
         let shutdown = manager.shutdown();
         std::fs::write(gate, b"finish").unwrap();
-        let diagnostic = handle.join().unwrap();
-        assert!(observed_probe, "fixture probe never started");
+        let rows = handle.join().unwrap().expect("diagnostic admission failed");
+        let probe = rows
+            .iter()
+            .find(|row| row.name == "Core executable")
+            .unwrap();
         assert!(
-            diagnostic.is_ok(),
-            "in-flight diagnostics unexpectedly failed"
+            observed_probe,
+            "fixture probe never started: {}",
+            probe.message
         );
+        assert_eq!(probe.level, "ok", "{}", probe.message);
         assert!(
             shutdown.is_err(),
             "shutdown completed while an unsupervised diagnostic probe was running"
