@@ -1,5 +1,7 @@
 name: Build native bundles
 on:
+  push:
+    branches: [fix/pr-1-qa-followups]
   pull_request:
     paths:
       - 'src/**'

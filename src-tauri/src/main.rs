@@ -72,12 +72,32 @@ async fn connection_config(
     })
     .await
 }
+struct TrayItems {
+    show: tauri::menu::MenuItem<tauri::Wry>,
+    quit: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+fn tray_labels(language: &str) -> (&'static str, &'static str) {
+    if language == "zh" {
+        ("显示 Coding Tools MCP", "停止服务并退出")
+    } else {
+        ("Show Coding Tools MCP", "Stop services and quit")
+    }
+}
+
 #[tauri::command]
 async fn save_settings(
+    app: tauri::AppHandle,
     state: State<'_, AppManager>,
     settings: Settings,
 ) -> Result<Settings, String> {
-    work(state.inner().clone(), move |m| m.save_settings(settings)).await
+    let saved = work(state.inner().clone(), move |m| m.save_settings(settings)).await?;
+    if let Some(items) = app.try_state::<TrayItems>() {
+        let labels = tray_labels(&saved.language);
+        let _ = items.show.set_text(labels.0);
+        let _ = items.quit.set_text(labels.1);
+    }
+    Ok(saved)
 }
 #[tauri::command]
 async fn install_core(state: State<'_, AppManager>, version: String) -> Result<String, String> {
@@ -268,22 +288,17 @@ fn main() {
                     return Ok(());
                 }
             };
+            let labels = tray_labels(&manager.settings().language);
             app.manage(manager);
-            let show_item = tauri::menu::MenuItem::with_id(
-                app,
-                "show",
-                "Show Coding Tools MCP",
-                true,
-                None::<&str>,
-            )?;
-            let quit_item = tauri::menu::MenuItem::with_id(
-                app,
-                "quit",
-                "Stop services and quit",
-                true,
-                None::<&str>,
-            )?;
+            let show_item =
+                tauri::menu::MenuItem::with_id(app, "show", labels.0, true, None::<&str>)?;
+            let quit_item =
+                tauri::menu::MenuItem::with_id(app, "quit", labels.1, true, None::<&str>)?;
             let menu = tauri::menu::Menu::with_items(app, &[&show_item, &quit_item])?;
+            app.manage(TrayItems {
+                show: show_item,
+                quit: quit_item,
+            });
             let mut tray = tauri::tray::TrayIconBuilder::new()
                 .menu(&menu)
                 .tooltip("Coding Tools MCP")

@@ -116,6 +116,11 @@ fn decode_config(bytes: &[u8]) -> Result<Config> {
     Ok(config)
 }
 
+fn other_config_version(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(bytes)
+        .is_ok_and(|value| value["schemaVersion"].as_u64().is_some_and(|n| n != 2))
+}
+
 impl Storage {
     pub fn open(home: PathBuf) -> Result<Self> {
         private_dir(&home)?;
@@ -167,7 +172,13 @@ impl Storage {
         private_write(&main, &next)
     }
     pub fn has_recoverable_backup(&self) -> bool {
-        fs::read(self.home.join(CONFIG_BACKUP)).is_ok_and(|bytes| decode_config(&bytes).is_ok())
+        let needs_recovery = match fs::read(self.home.join(CONFIG_FILE)) {
+            Ok(bytes) => decode_config(&bytes).is_err() && !other_config_version(&bytes),
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
+        needs_recovery
+            && fs::read(self.home.join(CONFIG_BACKUP))
+                .is_ok_and(|bytes| decode_config(&bytes).is_ok())
     }
     /// Restore only a malformed or missing main file; never roll back a healthy one.
     pub fn restore_backup(&self) -> Result<()> {
@@ -177,9 +188,7 @@ impl Storage {
         match fs::read(&main) {
             Ok(old) => {
                 // A newer schema may be healthy in a newer app. Do not replace it.
-                if serde_json::from_slice::<Value>(&old)
-                    .is_ok_and(|v| v["schemaVersion"].as_u64().is_some_and(|n| n != 2))
-                {
+                if other_config_version(&old) {
                     bail!("This configuration needs a compatible desktop version; it was not replaced");
                 }
                 if decode_config(&old).is_ok() {
@@ -375,6 +384,19 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("desktop-v2.invalid-"))
             .any(|v| std::fs::read(v.path()).unwrap() == b"{damaged"));
+    }
+
+    #[test]
+    fn does_not_offer_recovery_for_healthy_or_other_schema_configs() {
+        let home = tempfile::tempdir().unwrap();
+        let storage = Storage::open(home.path().to_owned()).unwrap();
+        storage.save(&Config::default()).unwrap();
+        assert!(!storage.has_recoverable_backup());
+        let main = home.path().join(CONFIG_FILE);
+        std::fs::write(&main, br#"{"schemaVersion":99,"workspaces":[]}"#).unwrap();
+        assert!(!storage.has_recoverable_backup());
+        assert!(storage.restore_backup().is_err());
+        assert!(std::fs::read_to_string(&main).unwrap().contains("99"));
     }
 
     #[test]
