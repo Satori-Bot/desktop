@@ -41,6 +41,7 @@ export const api = {
   exportDiagnostics: (id: string) => call<string>("export_diagnostics", { id }),
   connectionConfig: (id: string, isPublic: boolean) =>
     call<string>("connection_config", { id, public: isPublic }),
+  copyText: (text: string) => call<boolean>("copy_text", { text }),
   authDetails: (id: string) => call<AuthDetails>("auth_details", { id }),
   saveSettings: (settings: Settings) =>
     call<Settings>("save_settings", { settings }),
@@ -52,6 +53,9 @@ export const api = {
   pickDirectory: () => call<string | null>("pick_directory"),
   openWorkspace: (id: string) => call<void>("open_workspace", { id }),
   installCore: (version: string) => call<string>("install_core", { version }),
+  openInstallLogs: () => call<void>("open_install_logs"),
+  openSetupHelp: (topic: "core" | "cloudflare") =>
+    call<void>("open_setup_help", { topic }),
   rollbackCore: () => call<string>("rollback_core"),
   cloudflareLogin: () => call<string>("cloudflare_login"),
   setupNamedTunnel: (id: string, name: string, hostname: string) =>

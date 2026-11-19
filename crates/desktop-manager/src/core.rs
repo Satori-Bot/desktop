@@ -135,6 +135,15 @@ pub fn validate_override(args: &[String], directory: &Path) -> Result<()> {
         bail!("Enter a valid core executable and arguments");
     }
     let candidate = workspace_program(program, directory)?;
+    let file = candidate.file_name().and_then(|name| name.to_str());
+    let expected = if cfg!(windows) {
+        file.is_some_and(|name| name.eq_ignore_ascii_case("coding-tools-mcp.exe"))
+    } else {
+        file == Some("coding-tools-mcp")
+    };
+    if !expected {
+        bail!("Choose the installed coding-tools-mcp executable, not another program");
+    }
     let found = if candidate.is_absolute() {
         is_executable_file(&candidate)
     } else {
@@ -144,6 +153,21 @@ pub fn validate_override(args: &[String], directory: &Path) -> Result<()> {
         bail!("The selected core executable was not found or is not executable");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod override_validation {
+    use super::*;
+
+    #[test]
+    fn rejects_unrelated_executable_without_running_it() {
+        let executable = std::env::current_exe().unwrap();
+        let args = vec![executable.to_string_lossy().into_owned()];
+        let error = validate_override(&args, executable.parent().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not another program"));
+    }
 }
 pub fn resolve(w: &Workspace, config: &Config) -> Result<Vec<String>> {
     if !w.core_command.is_empty() {
@@ -169,7 +193,7 @@ pub fn resolve(w: &Workspace, config: &Config) -> Result<Vec<String>> {
     if let Some(path) = find_program("coding-tools-mcp") {
         return Ok(vec![path.to_string_lossy().into()]);
     }
-    bail!("Python core was not found in PATH or standard user/Homebrew locations. Open Settings and install the pinned core, or select an existing coding-tools-mcp executable.")
+    bail!("Core was not found. Open Settings to install the recommended version or choose an existing Core.")
 }
 pub fn command(w: &Workspace, secrets: &Secrets, config: &Config, state: &Path) -> Result<Command> {
     command_supervised(w, secrets, config, state, None)
@@ -457,6 +481,7 @@ pub(crate) fn install_with_bundled_uv(
         "bin/coding-tools-mcp"
     });
     let log = storage.home.join("core-install.log");
+    crate::events::begin_runtime_log(&log).context("Could not open the Core installation log")?;
     for mut cmd in [
         {
             let mut c = installer_command(&uv, &storage.home, bundled_uv.is_some())?;
@@ -504,12 +529,20 @@ pub(crate) fn install_with_bundled_uv(
             });
         }
         if !success {
-            bail!("Installation failed; previous core remains selected. See core-install.log.");
+            bail!(
+                "Installation failed; previous core remains selected. See core-install.log.\n{}",
+                log.display()
+            );
         }
     }
     let path = executable.to_string_lossy().into_owned();
-    let output = managed_version_output(std::slice::from_ref(&path), &storage.home)
-        .context("New core failed verification; previous core remains selected")?;
+    let output =
+        managed_version_output(std::slice::from_ref(&path), &storage.home).map_err(|error| {
+            anyhow::anyhow!(
+                "New core failed verification; previous core remains selected: {error:#}\n{}",
+                log.display()
+            )
+        })?;
     if reported_version(&output) != Some(version) {
         bail!("New core reported a different version than requested {version}; previous core remains selected");
     }

@@ -41,6 +41,11 @@ npm ci
 npm run tauri dev
 ```
 
+Vite ignores Rust's `target/` tree. If an existing Windows checkout still
+reports `EBUSY` from a locked build directory, set `CARGO_TARGET_DIR` to a
+directory outside the checkout before running the dev command, for example
+`$env:CARGO_TARGET_DIR = Join-Path $env:LOCALAPPDATA 'ctm-desktop-build'` in PowerShell.
+
 Build native bundles with the verified installer sidecar:
 
 ```sh
@@ -98,7 +103,16 @@ Configuration lives in `~/.coding-tools-mcp-desktop/desktop-v2.json`. On Unix th
 
 Managed cores live under `~/.coding-tools-mcp-desktop/cores/<version>-<id>/` (under the user profile on Windows). Uninstalling the desktop app does not delete these environments or your workspace configuration. The bundled installer keeps Python and caches in the app's private `runtime-installer/` subdirectory. Unbundled builds using external uv may use that tool's own configured Python and cache paths. Do not remove a managed environment while it is in use or selected for rollback; an existing external runtime is never removed by the desktop app.
 
-Configuration saves keep the previous valid `desktop-v2.json.bak` with the same access restrictions as the main file. If startup detects a damaged main file and a valid backup, the recovery dialog can restore the backup while retaining the damaged original.
+After a successful save the app mirrors the new configuration to the private
+`desktop-v2.json.bak`. If mirroring fails, the last valid copy remains. The
+recovery dialog shows the backup date and workspace count, keeps the damaged
+original, and restarts the app after recovery. If neither copy is usable, it
+can open the configuration folder without resetting anything. Current runtime
+logs are per start attempt; the immediately previous attempt is kept separately.
+
+For an existing Core choose the official `coding-tools-mcp` launcher
+(`coding-tools-mcp.exe` on Windows) from an installation you trust. Checking
+the path does not run it; the app confirms the server identity when it connects.
 
 Closing the window hides it in the tray by default. **Stop** cleans up only owned processes and checks port release. An unconfirmed port check stays visible, with retry or safe port editing available after owned cleanup. **Stop services and quit** requires owned-process cleanup; an unrelated listener does not prevent quitting. Crashes are detected, and retry/restart is explicit. Running workspaces cannot be reconfigured. Managed core installation verifies a new version before selecting it; failure leaves the prior environment selected. Rollback changes the selected environment without interrupting running workspaces.
 

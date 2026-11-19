@@ -169,7 +169,23 @@ impl Storage {
                 return Err(error).context("Could not read the previous desktop configuration")
             }
         }
-        private_write(&main, &next)
+        private_write(&main, &next)?;
+        // The primary commit succeeded. Updating the mirror is best effort:
+        // if the disk fails here, keep the last validated recovery copy and
+        // don't tell the caller to roll back a commit that already happened.
+        if let Err(error) = private_write(&backup, &next) {
+            eprintln!("Could not update the desktop configuration backup: {error}");
+        }
+        Ok(())
+    }
+    pub fn backup_preview(&self) -> Option<(std::time::SystemTime, usize)> {
+        if !self.has_recoverable_backup() {
+            return None;
+        }
+        let path = self.home.join(CONFIG_BACKUP);
+        let time = fs::metadata(&path).ok()?.modified().ok()?;
+        let config = decode_config(&fs::read(&path).ok()?).ok()?;
+        Some((time, config.workspaces.len()))
     }
     pub fn has_recoverable_backup(&self) -> bool {
         let needs_recovery = match fs::read(self.home.join(CONFIG_FILE)) {
@@ -371,10 +387,11 @@ mod tests {
         assert!(storage.save(&second).is_err());
         assert!(storage.load().is_err());
         assert!(storage.has_recoverable_backup());
+        assert_eq!(storage.backup_preview().unwrap().1, 0);
         storage.restore_backup().unwrap();
         assert_eq!(
             storage.load().unwrap().0.settings.language,
-            first.settings.language
+            second.settings.language
         );
         assert!(std::fs::read_dir(home.path())
             .unwrap()

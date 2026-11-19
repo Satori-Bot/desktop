@@ -16,6 +16,35 @@ const zh: Record<string, string> = {
   "Local service is not ready. You can copy this configuration, but confirm it is running and healthy before connecting a client.":
     "本地服务尚未就绪。可以复制配置，但连接客户端前请确认工作区已启动且服务正常。",
   "Core readiness check timed out": "核心就绪检查超时",
+  "Current startup output:": "本次启动输出：",
+  "Could not open a fresh runtime log": "无法创建本次运行日志",
+  "Choose a project folder, not your entire home directory":
+    "请选择具体的项目文件夹，不要选择整个用户主目录。",
+  "Choose the installed coding-tools-mcp executable, not another program":
+    "请选择已安装的 coding-tools-mcp 可执行文件，而不是其他程序。",
+  "Port is already in use. Choose another port.":
+    "此端口已被占用，请换一个端口。",
+  "Permission denied for this port. Choose another port.":
+    "没有权限使用此端口，请换一个端口。",
+  "Could not check whether this port is available": "无法检查此端口是否可用：",
+  "Clipboard text is not supported": "剪贴板不支持此文本。",
+  "The system clipboard is unavailable": "系统剪贴板不可用。",
+  "This Core can run tools, but does not record tool-call history. You can still connect and use it.":
+    "此版本不记录工具调用历史，但不影响连接和使用工具。",
+  "The recommended Core 0.5.0 works for connecting and running tools. Tool-call history is not included in this release.":
+    "推荐版本 0.5.0 支持连接和使用工具，本版本不含工具调用历史。",
+  "Not running. Start the workspace to check its connection.":
+    "尚未运行。请启动工作区后检查连接。",
+  "No tool calls recorded yet.": "暂未记录工具调用。",
+  "Core was not found. Open Settings to install the recommended version or choose an existing Core.":
+    "找不到核心。请在设置中安装推荐版本或选择已安装的核心。",
+  "Open installation log folder": "打开安装日志所在文件夹",
+  "View official Core releases": "查看官方核心版本",
+  "Cloudflare installation instructions": "查看 Cloudflare 安装说明",
+  "Cloudflare connector is not installed. Local MCP remains available.":
+    "未安装 Cloudflare 连接器。本地 MCP 仍可用。",
+  "Install the Cloudflare connector before setting up public access.":
+    "请先安装 Cloudflare 连接器，再配置公网访问。",
   "Recent runtime output:": "最近的运行输出：",
   "Public access is not verified. You can copy this configuration, but check the connection before using it.":
     "公网连接尚未验证。可以复制配置，但使用前请先检查连接。",

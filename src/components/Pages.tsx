@@ -152,6 +152,7 @@ export function ConnectionsPage({
   const [validation, setValidation] = useState("");
   const active = isActive(status);
   const setupBusy = busy || maintenanceBusy;
+  const canCheckPublic = workspace.access === "frp" || !!status?.publicEndpoint;
   async function showConfig(isPublic: boolean, copyOnly = false) {
     const key = isPublic ? publicKey : localKey;
     const result = await run(copyOnly ? "copy-config" : "config", () =>
@@ -306,11 +307,10 @@ export function ConnectionsPage({
                 variant="light"
                 disabled={!!busy || status?.state !== "running"}
                 loading={
-                  busy ===
-                  (workspace.access === "frp" ? "diagnose" : "retry-tunnel")
+                  busy === (canCheckPublic ? "diagnose" : "retry-tunnel")
                 }
                 onClick={() => {
-                  if (workspace.access === "frp") {
+                  if (canCheckPublic) {
                     void run(
                       "diagnose",
                       () => api.checkPublicRoute(workspace.id),
@@ -323,13 +323,25 @@ export function ConnectionsPage({
                   }
                 }}
               >
-                {t(
-                  workspace.access === "frp"
-                    ? "Check public address"
-                    : "Retry tunnel",
-                )}
+                {t(canCheckPublic ? "Check public address" : "Retry tunnel")}
               </Button>
             )}
+            {canCheckPublic &&
+              workspace.access !== "frp" &&
+              status?.publicState === "error" && (
+                <Button
+                  size="xs"
+                  variant="subtle"
+                  disabled={!!busy}
+                  onClick={() =>
+                    void run("retry-tunnel", () =>
+                      api.retryTunnel(workspace.id),
+                    )
+                  }
+                >
+                  {t("Retry tunnel")}
+                </Button>
+              )}
           </Group>
           {status?.publicCheckedAt && (
             <Text c="dimmed" size="xs" mt="xs">
@@ -647,7 +659,7 @@ export function ActivityPage({
           icon={<AlertCircle size={18} />}
         >
           {t(
-            "This core build does not expose tool-call history. Install an event-capable official core and select its executable in Settings. No calls are fabricated.",
+            "This Core can run tools, but does not record tool-call history. You can still connect and use it.",
           )}
           {status.activityMessage && (
             <Text size="xs" mt="xs">
@@ -1134,7 +1146,7 @@ export function SettingsPage({
         </Group>
         <Alert color="yellow" mb="lg">
           {t(
-            "Published core 0.5.0 supports launch and connections, but does not expose per-tool-call history. History requires an event-capable official core.",
+            "The recommended Core 0.5.0 works for connecting and running tools. Tool-call history is not included in this release.",
           )}
         </Alert>
         <Button
@@ -1196,6 +1208,26 @@ export function SettingsPage({
             {t("No previous managed core is available")}
           </Text>
         )}
+        {available && (
+          <Group gap="xs" mt="xs">
+            <Button
+              variant="subtle"
+              size="xs"
+              onClick={() => void run("open-install-logs", api.openInstallLogs)}
+            >
+              {t("Open installation log folder")}
+            </Button>
+            <Button
+              variant="subtle"
+              size="xs"
+              onClick={() =>
+                void run("open-core-releases", () => api.openSetupHelp("core"))
+              }
+            >
+              {t("View official Core releases")}
+            </Button>
+          </Group>
+        )}
         <Text c="dimmed" size="xs" mt="md">
           {t(
             "First setup needs internet to download the Core and, if needed, Python.",
@@ -1232,6 +1264,19 @@ export function SettingsPage({
             )}
           </Badge>
         </Group>
+        {available && cloudflaredAvailable === false && (
+          <Button
+            variant="subtle"
+            size="xs"
+            onClick={() =>
+              void run("open-cloudflare-help", () =>
+                api.openSetupHelp("cloudflare"),
+              )
+            }
+          >
+            {t("Cloudflare installation instructions")}
+          </Button>
+        )}
       </Paper>
       {workspace && (
         <RuntimeOverride
@@ -1350,6 +1395,23 @@ function RuntimeOverride({
             setDraft({ ...draft, executable: event.currentTarget.value })
           }
           disabled={active || !!busy}
+          rightSectionWidth={100}
+          rightSection={
+            <Button
+              size="compact-xs"
+              variant="light"
+              disabled={active || !!busy}
+              onClick={() =>
+                void run("browse-core", async () => {
+                  const path = await api.pickCoreExecutable();
+                  if (path && pageActive.current)
+                    setDraft((current) => ({ ...current, executable: path }));
+                })
+              }
+            >
+              {t("Browse")}
+            </Button>
+          }
         />
         <Textarea
           label={t("Arguments (one per line)")}

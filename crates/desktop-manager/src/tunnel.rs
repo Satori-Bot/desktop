@@ -91,7 +91,8 @@ pub(crate) fn spawn_supervised(
     state: &Path,
     supervisor: Option<&Path>,
 ) -> Result<ManagedProcess> {
-    let executable=find_program("cloudflared").context("cloudflared was not found in PATH or standard user/Homebrew locations. Install it from Cloudflare, then retry public access. Local MCP remains available.")?;
+    let executable = find_program("cloudflared")
+        .context("Cloudflare connector is not installed. Local MCP remains available.")?;
     let mut cmd = isolated_command(&executable, supervisor);
     cmd.arg("tunnel").arg("--no-autoupdate");
     let config = state.join("cloudflared.json");
@@ -192,7 +193,8 @@ fn run(executable: &Path, args: &[String], home: &Path, seconds: u64) -> Result<
     Ok(text)
 }
 pub fn login(home: &Path) -> Result<String> {
-    let exe = find_program("cloudflared").context("cloudflared was not found in PATH or standard user/Homebrew locations. Install cloudflared first")?;
+    let exe = find_program("cloudflared")
+        .context("Install the Cloudflare connector before setting up public access.")?;
     run(&exe, &["tunnel".into(), "login".into()], home, 180)?;
     Ok("Cloudflare authorization finished. You can now create a fixed tunnel. The account certificate stays on this computer.".into())
 }
@@ -230,7 +232,8 @@ pub fn setup(
     {
         bail!("Enter a valid public DNS hostname such as mcp.example.com before creating a tunnel");
     }
-    let exe = find_program("cloudflared").context("cloudflared was not found in PATH or standard user/Homebrew locations. Install cloudflared first")?;
+    let exe = find_program("cloudflared")
+        .context("Install the Cloudflare connector before setting up public access.")?;
     let dir = home.join("tunnels");
     private_dir(&dir)?;
     let credentials = dir.join(format!("{}.json", w.id));

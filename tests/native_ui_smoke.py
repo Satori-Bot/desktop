@@ -754,9 +754,20 @@ def run(args) -> None:
                     )
                 )
             )
+            # Force the failure mode reported on Linux, then read the real
+            # system clipboard. This does not simulate a successful write.
+            driver.execute_script("""
+                if (navigator.clipboard) {
+                    Object.defineProperty(navigator.clipboard, 'writeText', {
+                        configurable: true,
+                        value: () => Promise.reject(new DOMException(
+                            'The request is not allowed', 'NotAllowedError')),
+                    });
+                }
+            """)
             local_copy.click()
             # Read only after this test's explicit copy succeeds, inside its private Xvfb display.
-            # No clipboard stubs, browser permission grants, or direct clipboard writes are used.
+            # No browser permissions are granted and the test never writes to X11.
             visible_notice("Copied", "copy-config")
             copied = subprocess.run(
                 [clipboard_reader, "-o", "-selection", "clipboard"],

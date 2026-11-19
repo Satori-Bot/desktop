@@ -24,6 +24,7 @@ struct Session {
     runtime: Option<ManagedProcess>,
     tunnel: Option<ManagedProcess>,
     public_url: String,
+    last_local_probe: Option<Instant>,
 }
 
 struct Slot {
@@ -135,10 +136,32 @@ pub fn validate_workspace_folder(input: &str) -> Result<String> {
     if path.parent().is_none() {
         bail!("Choose a project folder, not a filesystem root");
     }
-    Ok(path
+    if dirs::home_dir()
+        .and_then(|home| home.canonicalize().ok())
+        .as_ref()
+        == Some(&path)
+    {
+        bail!("Choose a project folder, not your entire home directory");
+    }
+    let text = path
         .to_str()
-        .context("Workspace path must use valid UTF-8 characters")?
-        .to_owned())
+        .context("Workspace path must use valid UTF-8 characters")?;
+    #[cfg(windows)]
+    {
+        // Use normal Win32 path spelling for local drives and UNC shares.
+        // Keep the namespace intact for other device paths and long paths.
+        if text.encode_utf16().count() < 260 {
+            if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+                return Ok(format!(r"\\{unc}"));
+            }
+            if let Some(drive) = text.strip_prefix(r"\\?\") {
+                if drive.as_bytes().get(1) == Some(&b':') {
+                    return Ok(drive.to_owned());
+                }
+            }
+        }
+    }
+    Ok(text.to_owned())
 }
 
 fn validate_access(w: &Workspace, starting: bool) -> Result<()> {
@@ -473,6 +496,7 @@ impl Manager {
             }
             session.runtime = None;
             session.public_url.clear();
+            session.last_local_probe = None;
             *slot.run_started_ms.lock().unwrap() = None;
             self.update(slot, |s| {
                 *s = Status::stopped(&w);
@@ -480,6 +504,9 @@ impl Manager {
                 s.local_state = "starting".into();
                 s.local_message = "Starting the external Python core".into();
             });
+            let state = self.storage.state_dir(id)?;
+            events::begin_runtime_log(&state.join("runtime.log"))
+                .context("Could not open a fresh runtime log")?;
             validate_access(&w, true)?;
             validate_workspace_folder(&w.path)?;
             if w.port == 0 {
@@ -493,9 +520,16 @@ impl Manager {
             {
                 bail!("OAuth credentials are missing; repair the workspace configuration");
             }
-            let port=local_listener(w.port).context("Port is already in use or availability could not be confirmed. Stop its owner or choose another port; no unrelated process was terminated.")?;
+            let port = local_listener(w.port).map_err(|error| match error.kind() {
+                std::io::ErrorKind::AddrInUse => {
+                    anyhow!("Port is already in use. Choose another port.")
+                }
+                std::io::ErrorKind::PermissionDenied => {
+                    anyhow!("Permission denied for this port. Choose another port.")
+                }
+                _ => anyhow!("Could not check whether this port is available: {error}"),
+            })?;
             drop(port);
-            let state = self.storage.state_dir(id)?;
             events::begin_run(&state)?;
             let mut cmd = core::command_supervised(
                 &w,
@@ -559,7 +593,21 @@ impl Manager {
                     - process.started.elapsed().as_millis() as i64,
             );
             let activity_available = state.join("events/journal.lock").is_file();
-            self.update(slot,|s|{s.activity_state=if activity_available{"available"}else{"unavailable"}.into();s.activity_message=if activity_available{"Reading real calls from this core's private event journal"}else{"This core build does not expose a tool-call journal. Published 0.5.0 supports launch and connection; history requires an event-capable official core executable."}.into();});
+            session.last_local_probe = Some(Instant::now());
+            self.update(slot, |s| {
+                s.activity_state = if activity_available {
+                    "available"
+                } else {
+                    "unavailable"
+                }
+                .into();
+                s.activity_message = if activity_available {
+                    "Reading real calls from this core's private event journal"
+                } else {
+                    ""
+                }
+                .into();
+            });
             self.update(slot, |s| {
                 s.state = "running".into();
                 s.pid = Some(pid);
@@ -589,11 +637,11 @@ impl Manager {
                 }
             }
             *slot.run_started_ms.lock().unwrap() = None;
-            if let Ok(log) = self.logs(id, "runtime", 0) {
+            if let Some(log) = spawned.then(|| self.logs(id, "runtime", 0).ok()).flatten() {
                 let lines: Vec<_> = log.text.lines().rev().take(8).collect();
                 let tail = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
                 if !tail.trim().is_empty() {
-                    message.push_str("\nRecent runtime output:\n");
+                    message.push_str("\nCurrent startup output:\n");
                     message.push_str(&tail.chars().take(4000).collect::<String>());
                 }
             }
@@ -874,20 +922,31 @@ impl Manager {
                 }
                 let (cpu, memory) = p.metrics();
                 let uptime = p.started.elapsed().as_secs();
-                let health = core::probe(&w, &secret, false);
+                // Watch process exits at the normal cadence, but don't issue
+                // an MCP initialize on every metrics sample.
+                let health = if session
+                    .last_local_probe
+                    .is_none_or(|last| last.elapsed() >= Duration::from_secs(15))
+                {
+                    session.last_local_probe = Some(Instant::now());
+                    Some(core::probe(&w, &secret, false))
+                } else {
+                    None
+                };
                 self.update(&slot, |s| {
                     s.cpu_percent = cpu;
                     s.memory_bytes = memory;
                     s.uptime_seconds = uptime;
                     match health {
-                        Ok(message) => {
+                        Some(Ok(message)) => {
                             s.local_state = "ready".into();
                             s.local_message = message
                         }
-                        Err(e) => {
+                        Some(Err(e)) => {
                             s.local_state = "unhealthy".into();
                             s.local_message = e.to_string()
                         }
+                        None => {}
                     }
                 });
             }
@@ -981,19 +1040,42 @@ impl Manager {
             core::resolve(&w, &self.config())
                 .and_then(|args| core::version_output(&args, Path::new(&w.path))),
         );
-        push("Local MCP protocol", core::probe(&w, &s, false));
-        if w.access != "local" {
-            push(
-                "Public discovery",
-                self.probe_public(&w, &s, &slot, &session),
-            );
+        let running = slot.status.lock().unwrap().state == "running";
+        if running {
+            push("Local MCP protocol", core::probe(&w, &s, false));
+            if w.access != "local" {
+                push(
+                    "Public discovery",
+                    self.probe_public(&w, &s, &slot, &session),
+                );
+            }
+        } else {
+            for name in ["Local MCP protocol", "Public discovery"] {
+                if name == "Public discovery" && w.access == "local" {
+                    continue;
+                }
+                rows.push(Diagnostic {
+                    level: "warning".into(),
+                    name: name.into(),
+                    message: "Not running. Start the workspace to check its connection.".into(),
+                });
+            }
         }
         let activity_state = self.slot(&w).status.lock().unwrap().activity_state.clone();
         let records = self.activity(id)?;
         if activity_state == "unavailable" {
-            rows.push(Diagnostic{level:"warning".into(),name:"Tool activity".into(),message:"This running core build does not provide structured tool-call events. Published coding-tools-mcp==0.5.0 lacks this capability. History is verified with unchanged official commit d7c2dda48bcedbd066c7dbc24a1b63205384d269; explicitly select an event-capable official executable, or wait for a published release that includes journal support. The desktop does not substitute a Git build automatically.".into()});
+            rows.push(Diagnostic{level:"warning".into(),name:"Tool activity".into(),message:"This Core can run tools, but does not record tool-call history. You can still connect and use it.".into()});
         } else if records.is_empty() {
-            rows.push(Diagnostic{level:"warning".into(),name:"Tool activity".into(),message:"No tool records yet. Invoke a tool from an MCP client. The installed core must support CODING_TOOLS_MCP_EVENT_LOG_DIR; older builds cannot provide per-call history.".into()});
+            rows.push(Diagnostic {
+                level: "warning".into(),
+                name: "Tool activity".into(),
+                message: if running {
+                    "No tool calls recorded yet."
+                } else {
+                    "Not running. Start the workspace to check its connection."
+                }
+                .into(),
+            });
         } else {
             rows.push(Diagnostic {
                 level: "ok".into(),
@@ -1307,6 +1389,38 @@ mod admission_regressions {
             workspace = manager.save_workspace(workspace, None).unwrap();
         }
         reader.join().unwrap();
+    }
+
+    #[test]
+    fn rejected_start_excludes_previous_runtime_log_and_keeps_it_separate() {
+        let (_directory, manager, mut workspace) = fixture();
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        workspace.port = occupied.local_addr().unwrap().port();
+        let workspace = manager.save_workspace(workspace, None).unwrap();
+        let dir = manager.storage.state_dir(&workspace.id).unwrap();
+        events::append_log(&dir.join("runtime.log"), "PREVIOUS SUCCESS: POST 200\n").unwrap();
+
+        let error = manager.start(&workspace.id).unwrap_err().to_string();
+        assert!(error.contains("Port is already in use"), "{error}");
+        assert!(!error.contains("PREVIOUS SUCCESS"), "{error}");
+        assert_eq!(manager.logs(&workspace.id, "runtime", 0).unwrap().text, "");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("runtime.log.previous")).unwrap(),
+            "PREVIOUS SUCCESS: POST 200\n"
+        );
+        assert!(occupied.local_addr().is_ok());
+    }
+
+    #[test]
+    fn stopped_workspace_reports_connection_as_not_running() {
+        let (_directory, manager, workspace) = fixture();
+        let checks = manager.diagnose(&workspace.id).unwrap();
+        let protocol = checks
+            .iter()
+            .find(|row| row.name == "Local MCP protocol")
+            .unwrap();
+        assert_eq!(protocol.level, "warning");
+        assert!(protocol.message.starts_with("Not running."));
     }
 
     #[test]

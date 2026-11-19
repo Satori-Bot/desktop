@@ -27,6 +27,19 @@ async fn save_workspace(
     secrets: Option<Secrets>,
 ) -> Result<Workspace, String> {
     work(state.inner().clone(), move |m| {
+        let existing = m
+            .snapshot()
+            .workspaces
+            .into_iter()
+            .find(|saved| saved.id == workspace.id);
+        if existing.as_ref().is_none_or(|saved| {
+            saved.path != workspace.path || saved.core_command != workspace.core_command
+        }) {
+            desktop_manager::core::validate_override(
+                &workspace.core_command,
+                std::path::Path::new(&workspace.path),
+            )?;
+        }
         m.save_workspace(workspace, secrets)
     })
     .await
@@ -43,14 +56,69 @@ macro_rules! operation {
         }
     };
 }
-operation!(start_workspace, start, Status);
 operation!(stop_workspace, stop, Status);
-operation!(restart_workspace, restart, Status);
 operation!(retry_tunnel, retry_tunnel, Status);
 operation!(activity, activity, Vec<Activity>);
-operation!(diagnose, diagnose, Vec<Diagnostic>);
+fn guard_workspace_core(m: &Manager, id: &str) -> Result<(), desktop_manager::Error> {
+    if let Some(workspace) = m.snapshot().workspaces.into_iter().find(|w| w.id == id) {
+        desktop_manager::core::validate_override(
+            &workspace.core_command,
+            std::path::Path::new(&workspace.path),
+        )?;
+    }
+    Ok(())
+}
+macro_rules! core_operation {
+    ($name:ident,$method:ident,$result:ty) => {
+        #[tauri::command]
+        async fn $name(state: State<'_, AppManager>, id: String) -> Result<$result, String> {
+            work(state.inner().clone(), move |m| {
+                guard_workspace_core(m, &id)?;
+                m.$method(&id)
+            })
+            .await
+        }
+    };
+}
+core_operation!(start_workspace, start, Status);
+core_operation!(restart_workspace, restart, Status);
+core_operation!(diagnose, diagnose, Vec<Diagnostic>);
+core_operation!(export_diagnostics, export_diagnostics, String);
+
+#[tauri::command]
+async fn copy_text(app: tauri::AppHandle, text: String) -> Result<bool, String> {
+    #[cfg(target_os = "linux")]
+    {
+        if text.len() > 1024 * 1024 || text.contains('\0') {
+            return Err("Clipboard text is not supported".into());
+        }
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        app.run_on_main_thread(move || {
+            let result = gtk::gdk::Display::default()
+                .ok_or_else(|| "The system clipboard is unavailable".to_owned())
+                .map(|display| {
+                    gtk::Clipboard::for_display(&display, &gtk::gdk::SELECTION_CLIPBOARD)
+                        .set_text(&text);
+                    true
+                });
+            let _ = send.send(result);
+        })
+        .map_err(|error| error.to_string())?;
+        tauri::async_runtime::spawn_blocking(move || {
+            receive
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .map_err(|_| "The system clipboard is unavailable".to_owned())?
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, text);
+        Ok(false)
+    }
+}
 operation!(check_public_route, check_public_route, String);
-operation!(export_diagnostics, export_diagnostics, String);
 operation!(auth_details, auth_details, serde_json::Value);
 #[tauri::command]
 async fn logs(
@@ -106,6 +174,28 @@ async fn install_core(state: State<'_, AppManager>, version: String) -> Result<S
 #[tauri::command]
 async fn rollback_core(state: State<'_, AppManager>) -> Result<String, String> {
     work(state.inner().clone(), |m| m.rollback_core()).await
+}
+#[tauri::command]
+async fn open_install_logs(state: State<'_, AppManager>) -> Result<(), String> {
+    let folder = state.storage.home.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        open::that_detached(folder).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+async fn open_setup_help(topic: String) -> Result<(), String> {
+    let url = match topic.as_str() {
+        "core" => "https://github.com/xyTom/coding-tools-mcp/releases",
+        "cloudflare" => "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/",
+        _ => return Err("Unknown setup help topic".into()),
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        open::that_detached(url).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 #[tauri::command]
 async fn cloudflare_login(state: State<'_, AppManager>) -> Result<String, String> {
@@ -218,9 +308,9 @@ fn startup_error(app: &tauri::App, error: desktop_manager::Error) {
     }
     let handle = app.handle().clone();
     let home = Manager::default_home().ok();
-    let can_restore = home.as_ref().is_some_and(|dir| {
-        Storage::open(dir.clone()).is_ok_and(|storage| storage.has_recoverable_backup())
-    });
+    let preview = home
+        .as_ref()
+        .and_then(|dir| Storage::open(dir.clone()).ok()?.backup_preview());
     let location = home.as_ref().map_or(String::new(), |dir| {
         format!(
             "\n\nConfiguration: {}\nBackup: {}",
@@ -228,11 +318,34 @@ fn startup_error(app: &tauri::App, error: desktop_manager::Error) {
             dir.join(CONFIG_BACKUP).display()
         )
     });
-    let dialog = app.dialog().message(format!(
-        "{error:#}{location}\n\nOriginal files were preserved. Close this dialog and reopen the app after repairing or restoring the configuration."
-    )).title("Coding Tools MCP could not start").kind(MessageDialogKind::Error);
-    if !can_restore {
-        dialog.show(move |_| handle.exit(1));
+    let detail = preview.map_or_else(
+        || "No usable backup was found. Open the configuration folder to repair the files. Nothing was reset.".to_owned(),
+        |(time, count)| {
+            let local: chrono::DateTime<chrono::Local> = time.into();
+            format!("Backup saved {}; workspaces included: {count}. Changes made after this backup may be missing. The damaged file will be kept separately.", local.format("%Y-%m-%d %H:%M:%S %Z"))
+        },
+    );
+    let dialog = app
+        .dialog()
+        .message(format!("{error:#}{location}\n\n{detail}"))
+        .title("Coding Tools MCP could not start")
+        .kind(MessageDialogKind::Error);
+    if preview.is_none() {
+        if let Some(dir) = home.filter(|dir| dir.is_dir()) {
+            dialog
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Open configuration folder".into(),
+                    "Close".into(),
+                ))
+                .show(move |open_folder| {
+                    if open_folder {
+                        let _ = open::that_detached(dir);
+                    }
+                    handle.exit(1);
+                });
+        } else {
+            dialog.show(move |_| handle.exit(1));
+        }
         return;
     }
     dialog
@@ -249,12 +362,16 @@ fn startup_error(app: &tauri::App, error: desktop_manager::Error) {
                 let result = Manager::default_home()
                     .and_then(Storage::open)
                     .and_then(|s| s.restore_backup());
-                let text = match result {
-                    Ok(()) => "Backup restored. Reopen Coding Tools MCP.".to_owned(),
-                    Err(error) => format!("Could not restore the backup: {error:#}"),
-                };
-                let app = handle.clone();
-                handle.dialog().message(text).show(move |_| app.exit(1));
+                match result {
+                    Ok(()) => handle.request_restart(),
+                    Err(error) => {
+                        let app = handle.clone();
+                        handle
+                            .dialog()
+                            .message(format!("Could not restore the backup: {error:#}"))
+                            .show(move |_| app.exit(1));
+                    }
+                }
             });
         });
 }
@@ -363,6 +480,7 @@ fn main() {
             check_public_route,
             export_diagnostics,
             connection_config,
+            copy_text,
             auth_details,
             save_settings,
             pick_directory,
@@ -371,6 +489,8 @@ fn main() {
             validate_core_override,
             open_workspace,
             install_core,
+            open_install_logs,
+            open_setup_help,
             rollback_core,
             cloudflare_login,
             setup_named_tunnel,
@@ -379,6 +499,12 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("Could not start Coding Tools MCP desktop");
     app.run(|app, event| {
+        #[cfg(target_os = "macos")]
+        if matches!(&event, tauri::RunEvent::Reopen { .. })
+            && app.try_state::<AppManager>().is_some()
+        {
+            show(app);
+        }
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             if !app.state::<AtomicBool>().load(Ordering::SeqCst) {
                 api.prevent_exit();

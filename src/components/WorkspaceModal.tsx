@@ -50,6 +50,7 @@ function validate(workspace: Workspace, t: Translate) {
 }
 export function WorkspaceModal({
   workspace,
+  workspaceNames,
   onClose,
   onSaved,
   t,
@@ -60,6 +61,7 @@ export function WorkspaceModal({
   locked = false,
 }: {
   workspace: Workspace | null;
+  workspaceNames: string[];
   onClose: () => void;
   onSaved: (workspace: Workspace) => void;
   t: Translate;
@@ -116,6 +118,14 @@ export function WorkspaceModal({
   }
   function clearFieldError(field: WorkspaceField) {
     if (errorField === field) clearError();
+  }
+  function nameAlreadyUsed() {
+    const normalize = (name: string) => name.trim().toLowerCase();
+    const name = normalize(draft.name);
+    return (
+      name !== normalize(workspace?.name ?? "") &&
+      workspaceNames.some((other) => normalize(other) === name)
+    );
   }
   useEffect(() => {
     if (!opened || busy || !error) return;
@@ -199,6 +209,13 @@ export function WorkspaceModal({
   async function save(start: boolean) {
     if (!pageActive.current || lock.current || locked) return;
     if (start && needsCore) return;
+    if (nameAlreadyUsed()) {
+      fail(
+        t("A workspace already has this name; choose a different name"),
+        "name",
+      );
+      return;
+    }
     const port = portText.trim() === "" ? 0 : Number(portText);
     if (
       portText.trim() !== "" &&
@@ -294,6 +311,13 @@ export function WorkspaceModal({
         fail(
           t("Name and folder are required."),
           draft.name.trim() ? "path" : "name",
+        );
+        return;
+      }
+      if (nameAlreadyUsed()) {
+        fail(
+          t("A workspace already has this name; choose a different name"),
+          "name",
         );
         return;
       }

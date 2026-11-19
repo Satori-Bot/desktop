@@ -354,7 +354,14 @@ export default function App() {
     const sequence = ++feedbackRequest.current;
     setFeedback(null);
     try {
-      await navigator.clipboard.writeText(value);
+      // Native Linux reports true after taking ownership of the GTK clipboard.
+      // Browser preview uses Web Clipboard, as do the other desktop targets.
+      if (
+        !available ||
+        !navigator.userAgent.includes("Linux") ||
+        (await api.copyText(value)) !== true
+      )
+        await navigator.clipboard.writeText(value);
       if (mounted.current && sequence === feedbackRequest.current)
         setFeedback((current) =>
           current?.kind === "error"
@@ -956,7 +963,11 @@ export default function App() {
                         icon: Terminal,
                         label: "Core version",
                         value:
-                          status?.coreVersion || workspace.coreVersion || "—",
+                          (workspace.coreCommand.length
+                            ? status?.localState === "ready" &&
+                              status.coreVersion
+                            : status?.coreVersion || workspace.coreVersion) ||
+                          "—",
                         detail:
                           workspace.permissionMode === "safe"
                             ? "Mode: Safe"
@@ -1045,7 +1056,7 @@ export default function App() {
                         title={t("Tool history unavailable")}
                       >
                         {t(
-                          "This core build does not expose tool-call history. Install an event-capable official core and select its executable in Settings. No calls are fabricated.",
+                          "This Core can run tools, but does not record tool-call history. You can still connect and use it.",
                         )}
                       </Alert>
                     )}
@@ -1172,6 +1183,7 @@ export default function App() {
         <WorkspaceModal
           opened={page !== "Settings"}
           workspace={workspaceModal}
+          workspaceNames={snapshot?.workspaces.map((item) => item.name) ?? []}
           locked={
             !!workspaceModal &&
             isActive(

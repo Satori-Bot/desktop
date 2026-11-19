@@ -143,6 +143,7 @@ export async function mockDesktop(page: Page, options: FixtureOptions = {}) {
             state.snapshot.settings = args?.settings as Snapshot["settings"];
             return structuredClone(state.snapshot.settings);
           }
+          if (command === "copy_text") return false;
           if (command === "connection_config")
             return JSON.stringify(
               { mcpServers: { atlas: { url: "http://127.0.0.1:8765/mcp" } } },

@@ -52,6 +52,20 @@ pub fn append_log(path: &Path, text: &str) -> Result<()> {
     f.write_all(text.as_bytes())?;
     Ok(())
 }
+
+/// Start a fresh current log only after all previous writers have stopped.
+/// Preserve a distinct previous-attempt file; never combine attempts in the UI.
+pub fn begin_runtime_log(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+            fs::rename(path, path.with_extension("log.previous"))?;
+        }
+        Ok(_) => anyhow::bail!("Runtime log must be a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    private_write(path, b"")
+}
 pub fn logs(path: &Path, cursor: u64, secrets: &Secrets) -> Result<Logs> {
     if !path.exists() {
         return Ok(Logs {

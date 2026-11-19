@@ -362,6 +362,43 @@ describe("desktop rendered flows through mocked Tauri invoke", () => {
     await waitFor(() => expect(clipboard).toHaveBeenCalledTimes(2));
     expect(count("save_workspace")).toBe(0);
   });
+  it("copies Linux configuration through the desktop without WebKit clipboard permission", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("X11 Linux WebKit");
+    const original = invoke.getMockImplementation()!;
+    invoke.mockImplementation((command, args) =>
+      command === "copy_text" ? Promise.resolve(true) : original(command, args),
+    );
+    clipboard.mockRejectedValueOnce(new Error("NotAllowedError"));
+    await dashboard();
+    await navigate("Connections");
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "Copy config" })[0],
+    );
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("copy_text", {
+        text: '{"mcpServers":{"atlas":{"url":"http://127.0.0.1:8765/mcp"}}}',
+      }),
+    );
+    expect(clipboard).not.toHaveBeenCalled();
+  });
+  it("checks duplicate workspace names before the first wizard page advances", async () => {
+    await dashboard();
+    await userEvent.click(
+      screen.getByRole("button", { name: "New workspace" }),
+    );
+    fireEvent.change(screen.getByLabelText(/Workspace name/), {
+      target: { value: "  ATLAS WORKSPACE  " },
+    });
+    fireEvent.change(screen.getByLabelText(/Folder path/), {
+      target: { value: "/test-fixtures/new-project" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "A workspace already has this name",
+    );
+    expect(count("validate_workspace_path")).toBe(0);
+    expect(count("save_workspace")).toBe(0);
+  });
   it("shows public tunnel failure while retaining verified local online service", async () => {
     snapshot = fixtureSnapshot({ tunnelFailure: true });
     await dashboard();
@@ -527,7 +564,9 @@ describe("desktop rendered flows through mocked Tauri invoke", () => {
       screen.getByText("Test fixture: installed core lacks activity events"),
     ).toBeInTheDocument();
     expect(screen.queryByText("read_file")).not.toBeInTheDocument();
-    expect(screen.getByText(/No calls are fabricated/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/You can still connect and use it/),
+    ).toBeInTheDocument();
   });
   it("preserves literal executable arguments without shell splitting", async () => {
     snapshot = fixtureSnapshot({ stopped: true });
