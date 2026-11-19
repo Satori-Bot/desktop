@@ -57,12 +57,17 @@ jobs:
       - name: Check native Linux installer and license resources
         if: runner.os == 'Linux'
         run: |
-          dpkg-deb --contents target/release/bundle/deb/*.deb > bundle-contents.txt
-          grep '/LICENSE$' bundle-contents.txt
-          grep '/NOTICE$' bundle-contents.txt
-          grep -E '^-rwx.* \./usr/bin/coding-tools-mcp-uv$' bundle-contents.txt
-          grep '/third-party/uv/LICENSE-MIT$' bundle-contents.txt
-          grep '/third-party/uv/LICENSE-APACHE$' bundle-contents.txt
+          bundle_root="$(mktemp -d)"
+          trap 'rm -rf "$bundle_root"' EXIT
+          dpkg-deb --extract target/release/bundle/deb/*.deb "$bundle_root"
+          helper="$bundle_root/usr/bin/coding-tools-mcp-uv"
+          test -f "$helper"
+          test -x "$helper"
+          test "$("$helper" --version | cut -d' ' -f2)" = "$(python scripts/prepare-bundled-uv.py --version)"
+          resources="$bundle_root/usr/lib/Coding Tools MCP"
+          for license in LICENSE NOTICE third-party/uv/LICENSE-MIT third-party/uv/LICENSE-APACHE; do
+            test -s "$resources/$license" || { echo "Missing package resource: $license"; exit 1; }
+          done
       - name: Check macOS application includes executable installer
         if: runner.os == 'macOS'
         shell: bash
@@ -88,6 +93,8 @@ jobs:
   windows-quiet-install:
     name: Windows quiet install (${{ matrix.installer }})
     needs: bundles
+    # The Windows artifact is required, not a green Linux/macOS build.
+    if: ${{ !cancelled() }}
     runs-on: windows-latest
     timeout-minutes: 12
     strategy:
