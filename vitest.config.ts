@@ -4,9 +4,10 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
-    // Concurrent Mantine/jsdom suites can exhaust small Windows CI runners.
-    // Keep each flow's existing timeout and assertions, but avoid CPU contention.
+    // Avoid CPU contention on small hosted runners. The multi-step user-event
+    // flows can exceed Vitest's five-second limit on hosted Intel Macs.
     fileParallelism: false,
+    testTimeout: 20_000,
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
     restoreMocks: true,

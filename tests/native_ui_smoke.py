@@ -511,9 +511,27 @@ def run(args) -> None:
                               ancestorStyle.visibility !== 'visible' ||
                               Number(ancestorStyle.opacity) === 0) painted = false;
                         }
-                        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-                        const messageHit = document.elementFromPoint(
-                          messageRect.x + messageRect.width / 2, messageRect.y + messageRect.height / 2);
+                        // Toasts are intentionally click-through. Include the painted alert in
+                        // hit testing only for this measurement, without raising its z-index.
+                        const hitTargets = region && style.pointerEvents === 'none'
+                          ? Array.from(new Set([el, message])) : [];
+                        const originalPointers = hitTargets.map(node => [
+                          node.style.getPropertyValue('pointer-events'),
+                          node.style.getPropertyPriority('pointer-events'),
+                        ]);
+                        let hit, messageHit;
+                        try {
+                          hitTargets.forEach(node => node.style.setProperty('pointer-events', 'auto'));
+                          hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+                          messageHit = document.elementFromPoint(
+                            messageRect.x + messageRect.width / 2, messageRect.y + messageRect.height / 2);
+                        } finally {
+                          hitTargets.forEach((node, index) => {
+                            const [value, priority] = originalPointers[index];
+                            if (value) node.style.setProperty('pointer-events', value, priority);
+                            else node.style.removeProperty('pointer-events');
+                          });
+                        }
                         return {role: el.getAttribute('role'), text: (el.textContent || '').slice(0, 1200),
                           renderedText: (message.innerText || '').slice(0, 1200),
                           painted, unobscured: hit !== null && el.contains(hit) &&
