@@ -136,8 +136,11 @@ fn workspace(path: &std::path::Path) -> Workspace {
     serde_json::from_value(json!({"id":"","name":"Sample project","path":path,"port":test_port(),"access":"local","auth":"noauth","permissionMode":"safe","coreCommand":fixture()})).unwrap()
 }
 fn manager() -> (MutexGuard<'static, ()>, tempfile::TempDir, Arc<Manager>) {
+    manager_in(tempfile::tempdir().unwrap())
+}
+
+fn manager_in(dir: tempfile::TempDir) -> (MutexGuard<'static, ()>, tempfile::TempDir, Arc<Manager>) {
     let guard = lifecycle_fixture_lock();
-    let dir = tempfile::tempdir().unwrap();
     #[cfg(unix)]
     let m = Manager::open_supervised(
         dir.path().join("home"),
@@ -309,18 +312,34 @@ fn official_core_mcp_acceptance() {
         &std::env::var("DESKTOP_CORE_COMMAND_JSON").expect("set DESKTOP_CORE_COMMAND_JSON"),
     )
     .unwrap();
-    let (_test_guard, d, m) = manager();
+    eprintln!("[core acceptance] prepare isolated fixture");
+    let log_dir = std::env::var_os("DESKTOP_ACCEPTANCE_LOG_DIR");
+    let (_test_guard, d, m) = if let Some(path) = log_dir {
+        std::fs::create_dir_all(&path).unwrap();
+        // CI collects only redacted runtime logs, not the whole fixture.
+        manager_in(
+            tempfile::Builder::new()
+                .disable_cleanup(true)
+                .tempdir_in(path)
+                .unwrap(),
+        )
+    } else {
+        manager()
+    };
     let project = d.path().join("项目 空间 (MCP)");
     std::fs::create_dir(&project).unwrap();
     std::fs::write(project.join("hello.txt"), "desktop acceptance\n").unwrap();
     let mut w = workspace(&project);
     w.core_command = command;
     let w = m.save_workspace(w, None).unwrap();
+    eprintln!("[core acceptance] start core");
     let status = m.start(&w.id).unwrap();
+    eprintln!("[core acceptance] start returned {}", status.local_state);
     assert_eq!(status.local_state, "ready");
     let c = core::client().unwrap();
     let endpoint = format!("http://127.0.0.1:{}/mcp", w.port);
     let rpc = |id: u32, method: &str, params: serde_json::Value| -> serde_json::Value {
+        eprintln!("[core acceptance] RPC {id} {method}");
         let response = c
             .post(&endpoint)
             .header("Accept", "application/json, text/event-stream")
@@ -331,7 +350,9 @@ fn official_core_mcp_acceptance() {
         let status = response.status();
         let text = response.text().unwrap();
         assert!(status.is_success(), "{method}: {status}: {text}");
-        serde_json::from_str(&text).unwrap()
+        let payload = serde_json::from_str(&text).unwrap();
+        eprintln!("[core acceptance] RPC {id} returned HTTP {status}");
+        payload
     };
     let init = rpc(
         1,
@@ -359,6 +380,7 @@ fn official_core_mcp_acceptance() {
     );
     assert_eq!(fail["result"]["isError"], true);
     let expect_activity = std::env::var("DESKTOP_EXPECT_ACTIVITY").as_deref() != Ok("false");
+    eprintln!("[core acceptance] read activity and run diagnostics");
     let activity = m.activity(&w.id).unwrap();
     if expect_activity {
         assert_eq!(m.snapshot().statuses[0].activity_state, "available");
@@ -388,7 +410,9 @@ fn official_core_mcp_acceptance() {
     }
     // A real restart must release the prior journal/process, preserve history,
     // and expose only the capabilities of the newly launched core.
+    eprintln!("[core acceptance] restart core");
     let restarted = m.restart(&w.id).unwrap();
+    eprintln!("[core acceptance] restart returned {}", restarted.local_state);
     assert_eq!(restarted.local_state, "ready");
     assert_eq!(
         restarted.activity_state,
@@ -427,8 +451,10 @@ fn official_core_mcp_acceptance() {
     } else {
         assert!(combined.is_empty());
     }
+    eprintln!("[core acceptance] stop and verify port release");
     m.stop_all().unwrap();
     assert!(TcpListener::bind(("127.0.0.1", w.port)).is_ok());
+    eprintln!("[core acceptance] assertions complete");
 }
 
 #[test]

@@ -112,7 +112,17 @@ jobs:
           DESKTOP_EXPECT_ACTIVITY: ${{ matrix.activity }}
           CODING_TOOLS_MCP_TELEMETRY: 'off'
           DO_NOT_TRACK: '1'
-        run: cargo test -p desktop-manager official_core_mcp_acceptance --locked -- --ignored
+          DESKTOP_ACCEPTANCE_LOG_DIR: ${{ runner.temp }}/desktop-core-acceptance
+          RUST_BACKTRACE: '1'
+        run: cargo test -p desktop-manager --test lifecycle official_core_mcp_acceptance --locked -- --ignored --nocapture
+      - name: Preserve Core runtime logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: core-acceptance-logs-${{ matrix.os }}-${{ matrix.label }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/desktop-core-acceptance/*/home/state/*/runtime.log*
+          if-no-files-found: ignore
+          retention-days: 7
   package:
     runs-on: ubuntu-24.04
     steps:
