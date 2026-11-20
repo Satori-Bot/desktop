@@ -864,6 +864,14 @@ impl Manager {
         let c = self.config();
         for w in c.workspaces {
             let slot = self.slot(&w);
+            {
+                let status = slot.status.lock().unwrap();
+                // A stopped workspace (including a port held by someone else)
+                // has no process to poll. Do not contend with edits or removal.
+                if status.state != "running" && !status.cleanup_pending {
+                    continue;
+                }
+            }
             let Ok(mut session) = slot.session.try_lock() else {
                 continue;
             };
