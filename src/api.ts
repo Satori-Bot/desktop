@@ -36,16 +36,26 @@ export const api = {
   activity: (id: string) => call<Activity[]>("activity", { id }),
   logs: (id: string, kind: "runtime" | "tunnel", cursor = 0) =>
     call<Logs>("logs", { id, kind, cursor }),
+  checkPublicRoute: (id: string) => call<string>("check_public_route", { id }),
   diagnose: (id: string) => call<Diagnostic[]>("diagnose", { id }),
   exportDiagnostics: (id: string) => call<string>("export_diagnostics", { id }),
   connectionConfig: (id: string, isPublic: boolean) =>
     call<string>("connection_config", { id, public: isPublic }),
+  copyText: (text: string) => call<boolean>("copy_text", { text }),
   authDetails: (id: string) => call<AuthDetails>("auth_details", { id }),
   saveSettings: (settings: Settings) =>
     call<Settings>("save_settings", { settings }),
+  validateWorkspacePath: (path: string) =>
+    call<string>("validate_workspace_path", { path }),
+  validateCoreOverride: (path: string, args: string[]) =>
+    call<void>("validate_core_override", { path, args }),
+  pickCoreExecutable: () => call<string | null>("pick_core_executable"),
   pickDirectory: () => call<string | null>("pick_directory"),
   openWorkspace: (id: string) => call<void>("open_workspace", { id }),
   installCore: (version: string) => call<string>("install_core", { version }),
+  openInstallLogs: () => call<void>("open_install_logs"),
+  openSetupHelp: (topic: "core" | "cloudflare") =>
+    call<void>("open_setup_help", { topic }),
   rollbackCore: () => call<string>("rollback_core"),
   cloudflareLogin: () => call<string>("cloudflare_login"),
   setupNamedTunnel: (id: string, name: string, hostname: string) =>

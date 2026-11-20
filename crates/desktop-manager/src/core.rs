@@ -18,12 +18,12 @@ pub fn is_executable_file(path: &Path) -> bool {
     let Ok(metadata) = path.metadata() else {
         return false;
     };
-    if !metadata.is_file() {
-        return false;
-    }
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
+        if !metadata.is_file() {
+            return false;
+        }
         let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
             return false;
         };
@@ -31,7 +31,7 @@ pub fn is_executable_file(path: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        true
+        metadata.is_file()
     }
 }
 // Finder/Dock launches do not inherit a shell's PATH. Search only established
@@ -125,10 +125,60 @@ fn workspace_program(program: &str, directory: &Path) -> Result<PathBuf> {
     }
     Ok(path)
 }
+
+/// Validate an explicit override without executing user-selected software.
+pub fn validate_override(args: &[String], directory: &Path) -> Result<()> {
+    let Some(program) = args.first() else {
+        return Ok(());
+    };
+    if program.trim().is_empty() || args.iter().any(|arg| arg.contains('\0')) {
+        bail!("Enter a valid core executable and arguments");
+    }
+    let candidate = workspace_program(program, directory)?;
+    let file = candidate.file_name().and_then(|name| name.to_str());
+    let expected = if cfg!(windows) {
+        file.is_some_and(|name| name.eq_ignore_ascii_case("coding-tools-mcp.exe"))
+    } else {
+        file == Some("coding-tools-mcp")
+    };
+    if !expected {
+        bail!("Choose the installed coding-tools-mcp executable, not another program");
+    }
+    let found = if candidate.is_absolute() {
+        is_executable_file(&candidate)
+    } else {
+        find_program(program).is_some()
+    };
+    if !found {
+        bail!("The selected core executable was not found or is not executable");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod override_validation {
+    use super::*;
+
+    #[test]
+    fn rejects_unrelated_executable_without_running_it() {
+        let executable = std::env::current_exe().unwrap();
+        let args = vec![executable.to_string_lossy().into_owned()];
+        let error = validate_override(&args, executable.parent().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not another program"));
+    }
+}
 pub fn resolve(w: &Workspace, config: &Config) -> Result<Vec<String>> {
     if !w.core_command.is_empty() {
         let mut command = w.core_command.clone();
-        command[0] = workspace_program(&command[0], Path::new(&w.path))?
+        let resolved = workspace_program(&command[0], Path::new(&w.path))?;
+        let resolved = if resolved.is_absolute() {
+            resolved
+        } else {
+            find_program(&command[0]).unwrap_or(resolved)
+        };
+        command[0] = resolved
             .to_str()
             .context("Core executable path must use valid UTF-8 characters")?
             .into();
@@ -143,7 +193,7 @@ pub fn resolve(w: &Workspace, config: &Config) -> Result<Vec<String>> {
     if let Some(path) = find_program("coding-tools-mcp") {
         return Ok(vec![path.to_string_lossy().into()]);
     }
-    bail!("Python core was not found in PATH or standard user/Homebrew locations. Open Settings and install the pinned core, or select an existing coding-tools-mcp executable.")
+    bail!("Core was not found. Open Settings to install the recommended version or choose an existing Core.")
 }
 pub fn command(w: &Workspace, secrets: &Secrets, config: &Config, state: &Path) -> Result<Command> {
     command_supervised(w, secrets, config, state, None)
@@ -169,6 +219,9 @@ pub fn command_supervised(
         &w.permission_mode,
     ]);
     c.current_dir(&w.path);
+    if w.core_command.is_empty() && config.managed_core.is_some() {
+        isolate_python(&mut c);
+    }
     // Inherited core-specific options must not silently override the workspace being displayed.
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("CODING_TOOLS_MCP_") {
@@ -232,7 +285,7 @@ fn probe_json(response: reqwest::blocking::Response) -> Result<Value> {
 }
 pub fn probe(w: &Workspace, secrets: &Secrets, public: bool) -> Result<String> {
     let base = if public {
-        w.public_url.clone()
+        w.public_url.trim_end_matches('/').to_owned()
     } else {
         format!("http://127.0.0.1:{}", w.port)
     };
@@ -283,6 +336,26 @@ fn reported_version(output: &str) -> Option<&str> {
     })
 }
 pub fn version_output(args: &[String], dir: &Path) -> Result<String> {
+    version_output_inner(args, dir, false)
+}
+
+pub(crate) fn managed_version_output(args: &[String], dir: &Path) -> Result<String> {
+    version_output_inner(args, dir, true)
+}
+
+fn isolate_python(command: &mut Command) {
+    for key in [
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONUSERBASE",
+        "PYTHONSTARTUP",
+    ] {
+        command.env_remove(key);
+    }
+    command.env("PYTHONNOUSERSITE", "1");
+}
+
+fn version_output_inner(args: &[String], dir: &Path, managed: bool) -> Result<String> {
     if args.is_empty() || args[0].is_empty() {
         bail!("Core executable is not configured");
     }
@@ -295,6 +368,9 @@ pub fn version_output(args: &[String], dir: &Path) -> Result<String> {
         .current_dir(dir)
         .env("CODING_TOOLS_MCP_TELEMETRY", "off")
         .env("DO_NOT_TRACK", "1");
+    if managed {
+        isolate_python(&mut command);
+    }
     let mut p = ManagedProcess::spawn(&mut command, log.clone(), Secrets::default())?;
     let until = Instant::now() + Duration::from_secs(10);
     while p.alive() && Instant::now() < until {
@@ -318,19 +394,82 @@ pub fn version_output(args: &[String], dir: &Path) -> Result<String> {
     }
     Ok(text)
 }
-pub fn install(storage: &Storage, version: &str) -> Result<String> {
+pub fn install(storage: &Storage, version: &str) -> Result<(String, tempfile::TempDir)> {
+    install_with_bundled_uv(storage, version, None)
+}
+
+fn installer_command(uv: &Path, home: &Path, bundled: bool) -> Result<Command> {
+    let mut command = Command::new(uv);
+    if bundled {
+        let installer_home = home.join("runtime-installer");
+        let cache = installer_home.join("cache");
+        let python = installer_home.join("python");
+        let bin = installer_home.join("bin");
+        // The packaged helper is isolated from per-user pip/uv configuration,
+        // interpreter overrides, and active virtual environments. Keep network
+        // proxy and trust settings (e.g. HTTPS_PROXY and SSL_CERT_FILE) intact.
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy().to_ascii_uppercase();
+            if name.starts_with("UV_")
+                || name.starts_with("PIP_")
+                || [
+                    "VIRTUAL_ENV",
+                    "CONDA_PREFIX",
+                    "PYTHONHOME",
+                    "PYTHONPATH",
+                    "PYTHONUSERBASE",
+                ]
+                .contains(&name.as_str())
+            {
+                command.env_remove(key);
+            }
+        }
+        private_dir(&installer_home)?;
+        private_dir(&cache)?;
+        private_dir(&python)?;
+        private_dir(&bin)?;
+        command
+            .current_dir(&installer_home)
+            .env("UV_NO_CONFIG", "1")
+            .env("UV_NO_PROGRESS", "1")
+            .env("UV_MANAGED_PYTHON", "1")
+            .env("UV_CACHE_DIR", cache)
+            .env("UV_PYTHON_INSTALL_DIR", python)
+            .env("UV_PYTHON_BIN_DIR", bin);
+        isolate_python(&mut command);
+    }
+    Ok(command)
+}
+
+pub(crate) fn install_with_bundled_uv(
+    storage: &Storage,
+    version: &str,
+    bundled_uv: Option<&Path>,
+) -> Result<(String, tempfile::TempDir)> {
     if !regex::Regex::new(r"^\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?$")
         .unwrap()
         .is_match(version)
     {
         bail!("Enter an exact published version such as 0.5.0");
     }
-    let uv=find_program("uv").context("uv was not found in PATH or standard user/Homebrew locations. Install uv from https://docs.astral.sh/uv/getting-started/installation/ before installing a managed core")?;
-    let env = storage
-        .home
-        .join("cores")
-        .join(format!("{version}-{}", uuid::Uuid::new_v4().simple()));
-    private_dir(&env)?;
+    let uv = if let Some(path) = bundled_uv {
+        if !path.is_absolute() || !is_executable_file(path) {
+            bail!("The bundled Core installer is missing or not executable. Reinstall the desktop app or choose an existing Core.");
+        }
+        path.to_owned()
+    } else {
+        find_program("uv").context(
+            "This build does not include a Core installer, and uv was not found. Install the official desktop bundle, choose an existing Core, or install uv from https://docs.astral.sh/uv/getting-started/installation/."
+        )?
+    };
+    let cores = storage.home.join("cores");
+    private_dir(&cores)?;
+    // The venv must be built at its final path; console scripts can embed it.
+    // Keep the cleanup guard until the manager has persisted the selection.
+    let pending = tempfile::Builder::new()
+        .prefix(&format!("{version}-"))
+        .tempdir_in(cores)?;
+    let env = pending.path().to_path_buf();
     let python = env.join(if cfg!(windows) {
         "Scripts/python.exe"
     } else {
@@ -342,17 +481,22 @@ pub fn install(storage: &Storage, version: &str) -> Result<String> {
         "bin/coding-tools-mcp"
     });
     let log = storage.home.join("core-install.log");
+    crate::events::begin_runtime_log(&log).context("Could not open the Core installation log")?;
     for mut cmd in [
         {
-            let mut c = Command::new(&uv);
+            let mut c = installer_command(&uv, &storage.home, bundled_uv.is_some())?;
             c.arg("venv").arg(&env).args(["--python", "3.11"]);
             c
         },
         {
-            let mut c = Command::new(&uv);
-            c.args(["pip", "install", "--python"])
-                .arg(&python)
-                .arg(format!("coding-tools-mcp=={version}"));
+            let mut c = installer_command(&uv, &storage.home, bundled_uv.is_some())?;
+            c.args(["pip", "install", "--python"]).arg(&python);
+            if bundled_uv.is_some() {
+                // Packaged setup installs published wheels only. No compiler
+                // or package source-build scripts are needed on first use.
+                c.arg("--only-binary=:all:");
+            }
+            c.arg(format!("coding-tools-mcp=={version}"));
             c
         },
     ] {
@@ -362,22 +506,47 @@ pub fn install(storage: &Storage, version: &str) -> Result<String> {
             thread::sleep(Duration::from_millis(100));
         }
         if process.alive() {
-            process.stop()?;
+            if let Err(error) = process.stop() {
+                // Never remove an environment a retained child may still be using.
+                let retained = pending.keep();
+                return Err(error).with_context(|| {
+                    format!(
+                        "Core installation could not be stopped; retained {}",
+                        retained.display()
+                    )
+                });
+            }
             bail!("Installation timed out; previous core remains selected. See core-install.log.");
         }
         let success = process.succeeded();
-        process.stop()?;
+        if let Err(error) = process.stop() {
+            let retained = pending.keep();
+            return Err(error).with_context(|| {
+                format!(
+                    "Core installation cleanup is incomplete; retained {}",
+                    retained.display()
+                )
+            });
+        }
         if !success {
-            bail!("Installation failed; previous core remains selected. See core-install.log.");
+            bail!(
+                "Installation failed; previous core remains selected. See core-install.log.\n{}",
+                log.display()
+            );
         }
     }
     let path = executable.to_string_lossy().into_owned();
-    let output = version_output(std::slice::from_ref(&path), &storage.home)
-        .context("New core failed verification; previous core remains selected")?;
+    let output =
+        managed_version_output(std::slice::from_ref(&path), &storage.home).map_err(|error| {
+            anyhow::anyhow!(
+                "New core failed verification; previous core remains selected: {error:#}\n{}",
+                log.display()
+            )
+        })?;
     if reported_version(&output) != Some(version) {
         bail!("New core reported a different version than requested {version}; previous core remains selected");
     }
-    Ok(path)
+    Ok((path, pending))
 }
 
 #[cfg(test)]
@@ -394,6 +563,104 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         path
+    }
+
+    #[test]
+    fn packaged_installer_owns_its_python_and_cache_but_developer_uv_stays_configurable() {
+        let home = tempfile::tempdir().unwrap();
+        let installer = executable(home.path(), "bundled-uv");
+        let command = installer_command(&installer, home.path(), true).unwrap();
+        let vars: std::collections::HashMap<_, _> = command.get_envs().collect();
+        let owned = home.path().join("runtime-installer");
+        for (key, leaf) in [
+            ("UV_CACHE_DIR", "cache"),
+            ("UV_PYTHON_INSTALL_DIR", "python"),
+            ("UV_PYTHON_BIN_DIR", "bin"),
+        ] {
+            assert_eq!(
+                vars[std::ffi::OsStr::new(key)],
+                Some(owned.join(leaf).as_os_str())
+            );
+            assert!(owned.join(leaf).is_dir());
+        }
+        assert_eq!(
+            vars[std::ffi::OsStr::new("UV_MANAGED_PYTHON")],
+            Some("1".as_ref())
+        );
+        assert_eq!(
+            vars[std::ffi::OsStr::new("UV_NO_CONFIG")],
+            Some("1".as_ref())
+        );
+        assert_eq!(vars[std::ffi::OsStr::new("PYTHONPATH")], None);
+        assert_eq!(command.get_current_dir(), Some(owned.as_path()));
+        assert!(installer_command(&installer, home.path(), false)
+            .unwrap()
+            .get_envs()
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn missing_bundled_installer_does_not_silently_use_external_uv() {
+        let home = tempfile::tempdir().unwrap();
+        let storage = Storage::open(home.path().to_owned()).unwrap();
+        let failure =
+            install_with_bundled_uv(&storage, "0.5.0", Some(&home.path().join("missing")))
+                .unwrap_err();
+        assert!(failure
+            .to_string()
+            .contains("bundled Core installer is missing"));
+        assert!(!home.path().join("cores").exists());
+    }
+
+    #[test]
+    #[ignore = "online acceptance for checksum-verified packaged uv; pass DESKTOP_BUNDLED_UV_ACCEPTANCE"]
+    fn packaged_uv_isolates_a_real_managed_python_install() -> Result<()> {
+        let path = PathBuf::from(
+            std::env::var_os("DESKTOP_BUNDLED_UV_ACCEPTANCE")
+                .context("Provide the checksum-verified, staged uv executable")?,
+        )
+        .canonicalize()?;
+        let home = tempfile::tempdir()?;
+        let manager = crate::Manager::open_native(home.path().to_owned(), None, Some(path))?;
+        manager.install_core("0.5.0").map_err(|error| {
+            let log =
+                std::fs::read_to_string(home.path().join("core-install.log")).unwrap_or_default();
+            anyhow::anyhow!("{error:#}\n{log}")
+        })?;
+        let config = manager.storage.load()?.0;
+        let installed = PathBuf::from(
+            config
+                .managed_core
+                .context("Managed Core path is missing")?,
+        );
+        assert!(installed.starts_with(home.path().join("cores")));
+        let venv = installed
+            .parent()
+            .and_then(Path::parent)
+            .context("Managed venv path is missing")?;
+        let python = std::fs::read_to_string(venv.join("pyvenv.cfg"))?;
+        let managed_python = home.path().join("runtime-installer/python");
+        assert!(managed_python.read_dir()?.any(|entry| {
+            entry.is_ok_and(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("cpython-3.11.")
+            })
+        }));
+        assert!(
+            python.contains("runtime-installer") && python.contains("cpython-3.11"),
+            "{python}"
+        );
+        assert_eq!(
+            reported_version(&managed_version_output(
+                &[installed.to_string_lossy().into_owned()],
+                home.path()
+            )?),
+            Some("0.5.0")
+        );
+        Ok(())
     }
 
     #[test]

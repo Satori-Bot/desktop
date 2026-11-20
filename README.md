@@ -5,7 +5,7 @@ A local-first **Rust + Tauri 2** application with a **React, TypeScript and Mant
 ## First run
 
 1. Install a native desktop bundle, or build one below.
-2. Open **Settings → Install core** to create a private, versioned environment for the exact published Python core. This requires [uv](https://docs.astral.sh/uv/getting-started/installation/). You can instead select an existing official core executable and separate argument list.
+2. Choose **Install recommended Core** in Settings, or **Use existing Core** in the new workspace wizard. Native bundles include the installer helper, so you do not need to install Python or uv yourself. Managed setup needs an internet connection to download a private Python 3.11 and the selected Core version. **Use existing Core** skips that download.
 3. Add a workspace folder. **Local only** is the default; no tunnel or account is needed.
 4. Start it and copy its MCP connection configuration. Local and public health are shown independently.
 
@@ -26,7 +26,7 @@ History displays the core's real structured events, including tool name, timesta
 - **Named Tunnel:** a reusable HTTPS hostname. Use an existing tunnel token/hostname, or explicitly authorize `cloudflared tunnel login`, then create a named tunnel and DNS route in the guided UI. The latter requires a domain on your Cloudflare account. The app confirms before creating DNS and never silently replaces another route.
 - **FRP:** reuse an externally managed FRP route. The app does not manage `frpc`.
 
-For native GUI launches, helper discovery first honors PATH, then checks `~/.local/bin` and standard Homebrew directories (`/opt/homebrew/bin` before `/usr/local/bin` in Apple Silicon builds; the reverse in Intel builds). Linux also checks `/usr/local/bin` and `/home/linuxbrew/.linuxbrew/bin`. Only uv, cloudflared and the default core receive these fallbacks. The app never sources shell profiles or workspace configuration to locate them. Explicit relative core executable paths and relative arguments are resolved from the workspace folder.
+Packaged builds prefer their bundled Core installer. For developer builds and the other native helpers, discovery first honors PATH, then checks `~/.local/bin` and standard Homebrew directories (`/opt/homebrew/bin` before `/usr/local/bin` in Apple Silicon builds; the reverse in Intel builds). Linux also checks `/usr/local/bin` and `/home/linuxbrew/.linuxbrew/bin`. Only uv, cloudflared and the default core receive these fallbacks. The app never sources shell profiles or workspace configuration to locate them. Explicit relative core executable paths and relative arguments are resolved from the workspace folder.
 
 Install [cloudflared](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/) separately. A failed tunnel leaves local MCP running. “Connected” means cloudflared connected; run diagnostics to verify public discovery. An authenticated MCP client must still complete its own authorization.
 
@@ -41,11 +41,19 @@ npm ci
 npm run tauri dev
 ```
 
-Build native bundles:
+Vite ignores Rust's `target/` tree. If an existing Windows checkout still
+reports `EBUSY` from a locked build directory, set `CARGO_TARGET_DIR` to a
+directory outside the checkout before running the dev command, for example
+`$env:CARGO_TARGET_DIR = Join-Path $env:LOCALAPPDATA 'ctm-desktop-build'` in PowerShell.
+
+Build native bundles with the verified installer sidecar:
 
 ```sh
-npm run tauri build
+python scripts/prepare-bundled-uv.py
+npm run tauri build -- --config src-tauri/gen/runtime-installer/tauri-runtime.json -- --locked
 ```
+
+The staging script pins and verifies the official [Astral uv release](https://github.com/astral-sh/uv/releases/tag/0.13.7) for the Rust host target. Plain developer builds omit the sidecar and can use an external [uv](https://docs.astral.sh/uv/getting-started/installation/) or an existing Core instead.
 
 Headless manager tests do not require GTK/WebKit or a desktop session:
 
@@ -92,6 +100,19 @@ CI covers Linux/macOS/Windows manager/native builds, Python packaging, frontend 
 - `mcp_desktop_client`: compatibility package preserving `coding-tools-mcp-desktop` and `mcp_desktop_client.app:main`. It launches an already installed native executable and never downloads software. `pip install` alone does not install a GUI. Set `CODING_TOOLS_MCP_DESKTOP_BINARY` to a native executable if discovery cannot find it.
 
 Configuration lives in `~/.coding-tools-mcp-desktop/desktop-v2.json`. On Unix the private directory uses mode 0700 and files use 0600; Windows uses the user's profile ACL. Existing v1 profiles/secrets are backed up before migration and originals are retained. Invalid/future configuration fails with a useful error rather than resetting workspaces. Old running processes are never adopted by PID or killed: stop them in the old app before starting the migrated workspace.
+
+Managed cores live under `~/.coding-tools-mcp-desktop/cores/<version>-<id>/` (under the user profile on Windows). Uninstalling the desktop app does not delete these environments or your workspace configuration. The bundled installer keeps Python and caches in the app's private `runtime-installer/` subdirectory. Unbundled builds using external uv may use that tool's own configured Python and cache paths. Do not remove a managed environment while it is in use or selected for rollback; an existing external runtime is never removed by the desktop app.
+
+After a successful save the app mirrors the new configuration to the private
+`desktop-v2.json.bak`. If mirroring fails, the last valid copy remains. The
+recovery dialog shows the backup date and workspace count, keeps the damaged
+original, and restarts the app after recovery. If neither copy is usable, it
+can open the configuration folder without resetting anything. Current runtime
+logs are per start attempt; the immediately previous attempt is kept separately.
+
+For an existing Core choose the official `coding-tools-mcp` launcher
+(`coding-tools-mcp.exe` on Windows) from an installation you trust. Checking
+the path does not run it; the app confirms the server identity when it connects.
 
 Closing the window hides it in the tray by default. **Stop** cleans up only owned processes and checks port release. An unconfirmed port check stays visible, with retry or safe port editing available after owned cleanup. **Stop services and quit** requires owned-process cleanup; an unrelated listener does not prevent quitting. Crashes are detected, and retry/restart is explicit. Running workspaces cannot be reconfigured. Managed core installation verifies a new version before selecting it; failure leaves the prior environment selected. Rollback changes the selected environment without interrupting running workspaces.
 

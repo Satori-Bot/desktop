@@ -483,7 +483,9 @@ dependencies = [
 name = "coding-tools-mcp-desktop-native"
 version = "0.2.0"
 dependencies = [
+ "chrono",
  "desktop-manager",
+ "gtk",
  "open",
  "serde",
  "serde_json",

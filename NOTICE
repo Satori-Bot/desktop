@@ -5,3 +5,8 @@ This product includes software and documentation developed for the
 Coding Tools MCP project.
 
 Source: https://github.com/xyTom/coding-tools-mcp
+
+Native installers may include a pinned binary of uv, developed by Astral
+Software Inc. and contributors. uv is distributed under the MIT or Apache 2.0
+license; the upstream license texts are bundled under third-party/uv.
+Source: https://github.com/astral-sh/uv/releases/tag/0.13.7

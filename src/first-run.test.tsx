@@ -61,6 +61,7 @@ beforeEach(() => {
   invoke.mockReset();
   invoke.mockImplementation(async (command, args) => {
     if (errors[command]) throw new Error(errors[command]);
+    if (command === "validate_workspace_path") return String(args?.path);
     if (command === "snapshot") return structuredClone(snapshot);
     if (command === "activity") return [];
     if (command === "install_core") {
@@ -102,56 +103,165 @@ describe.each(["en", "zh"] as const)("first-run guidance in %s", (language) => {
     snapshot.settings.language = language;
   });
 
-  it("guides an empty installation to Core setup before creating or starting a workspace", async () => {
+  it("uses an existing Core for the first workspace without installing another one", async () => {
     snapshot.workspaces = [];
     snapshot.statuses = [];
     snapshot.coreAvailable = false;
     await mount();
-    expect(
-      screen.queryByRole("button", { name: t("Create your first workspace") }),
-    ).toBeNull();
-    await click(t("New workspace"));
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(
-      screen.getByRole("heading", { name: t("Managed core") }),
-    ).toBeVisible();
-    expect(count("save_workspace")).toBe(0);
-    expect(count("start_workspace")).toBe(0);
-    fireEvent.change(screen.getByLabelText(t("Version to install")), {
-      target: { value: " 0.5.0 " },
-    });
-    await click(t("Install version"));
-    expect(invoke).toHaveBeenCalledWith("install_core", { version: "0.5.0" });
     await click(t("Create your first workspace"));
     const dialog = screen.getByRole("dialog", { name: t("New workspace") });
+    await click(t("Use existing Core"), dialog);
+    fireEvent.change(
+      within(dialog).getByLabelText(t("Existing core executable")),
+      {
+        target: { value: "/fixture/core" },
+      },
+    );
     fireEvent.change(
       within(dialog).getByLabelText(t("Workspace name"), { exact: false }),
-      { target: { value: "New project" } },
+      {
+        target: { value: "New project" },
+      },
     );
     fireEvent.change(
       within(dialog).getByLabelText(t("Folder path"), { exact: false }),
-      { target: { value: "/test-fixtures/new-project" } },
+      {
+        target: { value: "/test-fixtures/new-project" },
+      },
     );
     await click(t("Continue"), dialog);
     await click(t("Continue"), dialog);
     await click(t("Create and start"), dialog);
+    expect(invoke).toHaveBeenCalledWith("validate_core_override", {
+      path: "/test-fixtures/new-project",
+      args: ["/fixture/core"],
+    });
+    expect(count("install_core")).toBe(0);
     expect(count("save_workspace")).toBe(1);
     expect(count("start_workspace")).toBe(1);
   });
 
-  it("makes installation the primary welcome action", async () => {
+  it("offers a pinned recommended version, and does not install on navigation", async () => {
     snapshot.workspaces = [];
     snapshot.statuses = [];
     snapshot.coreAvailable = false;
     await mount();
-    await click(
-      t("Install core"),
-      document.querySelector<HTMLElement>(".welcome-title")!,
-    );
-    expect(
-      screen.getByRole("heading", { name: t("Managed core") }),
-    ).toBeVisible();
+    await navigate("Settings");
     expect(count("install_core")).toBe(0);
+    await click(`${t("Install recommended Core")} (0.5.0)`);
+    expect(invoke).toHaveBeenCalledWith("install_core", { version: "0.5.0" });
+  });
+
+  it("stops in the folder step when the desktop rejects the path", async () => {
+    snapshot.workspaces = [];
+    snapshot.statuses = [];
+    errors.validate_workspace_path = "Choose an existing workspace folder";
+    await mount();
+    await click(t("Create your first workspace"));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(
+      within(dialog).getByLabelText(t("Workspace name"), { exact: false }),
+      {
+        target: { value: "Project" },
+      },
+    );
+    fireEvent.change(
+      within(dialog).getByLabelText(t("Folder path"), { exact: false }),
+      {
+        target: { value: "/missing-project" },
+      },
+    );
+    await click(t("Continue"), dialog);
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      t("Choose an existing workspace folder"),
+    );
+    const folder = within(dialog).getByLabelText(t("Folder path"), {
+      exact: false,
+    });
+    expect(folder).toBeVisible();
+    expect(folder).toHaveFocus();
+    expect(folder).toHaveAttribute("aria-invalid", "true");
+    expect(count("save_workspace")).toBe(0);
+  });
+
+  it("lets IME finish composing before Enter can advance the folder step", async () => {
+    snapshot.workspaces = [];
+    snapshot.statuses = [];
+    await mount();
+    await click(t("Create your first workspace"));
+    const dialog = screen.getByRole("dialog");
+    const name = within(dialog).getByLabelText(t("Workspace name"), {
+      exact: false,
+    });
+    const folder = within(dialog).getByLabelText(t("Folder path"), {
+      exact: false,
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(20));
+    expect(name).toHaveFocus();
+    fireEvent.change(name, { target: { value: "测试项目" } });
+    fireEvent.change(folder, { target: { value: "/fixture/project" } });
+    await act(async () =>
+      fireEvent.keyDown(name, { key: "Enter", isComposing: true }),
+    );
+    await act(async () =>
+      fireEvent.keyDown(name, { key: "Enter", keyCode: 229 }),
+    );
+    expect(count("validate_workspace_path")).toBe(0);
+    expect(name).toHaveValue("测试项目");
+    await act(async () => fireEvent.keyDown(name, { key: "Enter" }));
+    expect(count("validate_workspace_path")).toBe(1);
+    expect(
+      within(dialog).getByRole("textbox", { name: t("Access") }),
+    ).toBeVisible();
+  });
+
+  it("shows the installation error within the wizard and can retry without losing the draft", async () => {
+    snapshot.workspaces = [];
+    snapshot.statuses = [];
+    snapshot.coreAvailable = false;
+    errors.install_core = "Runtime download interrupted";
+    await mount();
+    await click(t("Create your first workspace"));
+    const dialog = screen.getByRole("dialog");
+    const name = within(dialog).getByLabelText(t("Workspace name"), {
+      exact: false,
+    });
+    fireEvent.change(name, { target: { value: "Working name" } });
+    await click(t("Install core"), dialog);
+    expect(
+      within(dialog).getByText("Runtime download interrupted"),
+    ).toBeVisible();
+    expect(name).toHaveValue("Working name");
+    delete errors.install_core;
+    await click(t("Install core"), dialog);
+    expect(count("install_core")).toBe(2);
+    expect(
+      within(dialog).queryByText("Runtime download interrupted"),
+    ).not.toBeInTheDocument();
+    expect(name).toHaveValue("Working name");
+  });
+
+  it("does not silently clamp or reinterpret an invalid port", async () => {
+    await mount();
+    await navigate("Connections");
+    await click(t("Edit workspace"));
+    const dialog = screen.getByRole("dialog");
+    const port = within(dialog).getByRole("textbox", { name: t("Port") });
+    for (const invalid of ["99999", "-50", "abc", "0"]) {
+      fireEvent.change(port, { target: { value: invalid } });
+      await click(t("Save changes"), dialog);
+      expect(port).toHaveValue(invalid);
+      expect(port).toHaveFocus();
+      expect(port).toHaveAttribute("aria-invalid", "true");
+      expect(
+        within(dialog).getByText(
+          t(
+            "Enter a whole port number from 1 to 65535, or leave blank for automatic.",
+          ),
+        ),
+      ).toBeVisible();
+    }
+    expect(count("save_workspace")).toBe(0);
   });
 
   it("guides a stopped default workspace to setup while allowing an explicitly selected core", async () => {
@@ -165,6 +275,8 @@ describe.each(["en", "zh"] as const)("first-run guidance in %s", (language) => {
       document.querySelector<HTMLElement>(".workspace-controls")!,
     );
     expect(count("start_workspace")).toBe(0);
+    expect(invoke).toHaveBeenCalledWith("install_core", { version: "0.5.0" });
+    snapshot.coreAvailable = false;
     snapshot.workspaces[0].coreCommand = ["/test-fixtures/official-core"];
     await poll();
     await navigate("Dashboard");
@@ -199,12 +311,13 @@ describe.each(["en", "zh"] as const)("first-run guidance in %s", (language) => {
     expect(count("save_workspace")).toBe(0);
     expect(count("start_workspace")).toBe(0);
     await click(t("Install core"), dialog);
-    fireEvent.change(screen.getByLabelText(t("Version to install")), {
-      target: { value: "0.5.0" },
-    });
-    await click(t("Install version"));
-    await click(t("Create your first workspace"));
+    expect(count("install_core")).toBe(1);
+    expect(count("save_workspace")).toBe(0);
+    expect(count("start_workspace")).toBe(0);
     const resumed = screen.getByRole("dialog");
+    expect(
+      within(resumed).getByRole("button", { name: t("Create and start") }),
+    ).toBeEnabled();
     await click(t("Back"), resumed);
     await click(t("Back"), resumed);
     expect(

@@ -10,7 +10,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { translator } from "./i18n";
-import { fixtureSnapshot } from "./test/fixtures";
+import { fixtureSnapshot, fixtureStatus } from "./test/fixtures";
 import type { Snapshot, Status, Workspace } from "./types";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -484,4 +484,123 @@ describe("port-only release recovery", () => {
       ).toBeEnabled();
     },
   );
+});
+
+describe("snapshot and connection ordering", () => {
+  it("uses the authoritative start result before a post-start snapshot finishes", async () => {
+    const postStart = deferred<Snapshot>();
+    let reads = 0;
+    invoke.mockImplementation((command, args) => {
+      if (command === "snapshot" && ++reads > 1) return postStart.promise;
+      if (command === "start_workspace") {
+        snapshot.statuses[0] = { ...fixtureStatus };
+        return Promise.resolve({ ...fixtureStatus });
+      }
+      return fallback(command, args);
+    });
+    await mount();
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Start workspace" })),
+    );
+    expect(
+      screen.getByRole("button", { name: "Stop workspace" }),
+    ).toBeDisabled();
+    expect(calls("snapshot")).toHaveLength(2);
+    await act(async () => postStart.resolve(structuredClone(snapshot)));
+    expect(
+      screen.getByRole("button", { name: "Stop workspace" }),
+    ).toBeEnabled();
+  });
+
+  it("refreshes the port warning immediately even when Stop rejects", async () => {
+    snapshot.statuses[0] = { ...fixtureStatus };
+    const preStop = deferred<Snapshot>();
+    const stale = structuredClone(snapshot);
+    let reads = 0;
+    invoke.mockImplementation((command, args) => {
+      if (command === "snapshot" && ++reads === 2) return preStop.promise;
+      if (command === "stop_workspace") {
+        Object.assign(snapshot.statuses[0], {
+          state: "error",
+          localState: "error",
+          pid: null,
+          portReleasePending: true,
+        });
+        return Promise.reject(new Error("Stopped, but port still busy"));
+      }
+      return fallback(command, args);
+    });
+    await mount();
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Stop workspace" })),
+    );
+    expect(calls("snapshot")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "Restart" })).toBeDisabled();
+    await act(async () => preStop.resolve(stale));
+    expect(screen.getByRole("button", { name: "Restart" })).toBeDisabled();
+    expect(screen.getByText("Stopped, but port still busy")).toBeVisible();
+  });
+
+  it("copies saved configuration without waiting for an unrelated status read", async () => {
+    snapshot.statuses[0] = { ...fixtureStatus };
+    const hungRead = deferred<Snapshot>();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    let reads = 0;
+    invoke.mockImplementation((command, args) => {
+      if (command === "snapshot" && ++reads > 1) return hungRead.promise;
+      if (command === "connection_config")
+        return Promise.resolve("current configuration");
+      return fallback(command, args);
+    });
+    await mount();
+    await navigate("Connections");
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    await act(async () =>
+      fireEvent.click(
+        screen.getAllByRole("button", { name: "Copy config" })[0],
+      ),
+    );
+    expect(writeText).toHaveBeenCalledWith("current configuration");
+    expect(calls("snapshot")).toHaveLength(2);
+    await act(async () => hungRead.resolve(structuredClone(snapshot)));
+  });
+
+  it("does not copy a Quick Tunnel config when a newer URL is already visible", async () => {
+    const previous = "https://previous.trycloudflare.test/mcp";
+    const replacement = "https://updated.trycloudflare.test/mcp";
+    snapshot.statuses[0] = {
+      ...fixtureStatus,
+      publicEndpoint: previous,
+      publicState: "ready",
+    };
+    Object.assign(snapshot.workspaces[0], { access: "quick", auth: "bearer" });
+    const delayed = deferred<string>();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    invoke.mockImplementation((command, args) =>
+      command === "connection_config"
+        ? delayed.promise
+        : fallback(command, args),
+    );
+    await mount();
+    await navigate("Connections");
+    await act(async () =>
+      fireEvent.click(
+        screen.getAllByRole("button", { name: "Copy config" })[1],
+      ),
+    );
+    snapshot.statuses[0].publicEndpoint = replacement;
+    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    expect(screen.getByText(replacement)).toBeVisible();
+    await act(async () => delayed.resolve(previous));
+    expect(writeText).not.toHaveBeenCalled();
+  });
 });

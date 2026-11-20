@@ -505,7 +505,10 @@ for (const viewport of [
     await expectFeedbackInViewport(page, success);
     await expect(feedback).toHaveCSS("position", "fixed");
     await expect(feedback).toHaveCSS("pointer-events", "none");
-    await expect(success).toHaveCSS("pointer-events", "auto");
+    await expect(success).toHaveCSS("pointer-events", "none");
+    await expect(
+      feedback.getByRole("button", { name: "Dismiss notification" }),
+    ).toHaveCSS("pointer-events", "auto");
     expect(
       await feedback.evaluate((node) => Number(getComputedStyle(node).zIndex)),
     ).toBeLessThan(200);

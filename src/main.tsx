@@ -5,6 +5,10 @@ import "@mantine/core/styles.css";
 import "@fontsource-variable/geist";
 import "./styles.css";
 import App from "./App";
+import { backendAvailable } from "./api";
+import { installNativeWindowControls } from "./nativeWindow";
+
+if (backendAvailable()) installNativeWindowControls(window);
 const theme = createTheme({
   primaryColor: "teal",
   primaryShade: 8,

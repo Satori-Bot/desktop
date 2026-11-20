@@ -511,9 +511,27 @@ def run(args) -> None:
                               ancestorStyle.visibility !== 'visible' ||
                               Number(ancestorStyle.opacity) === 0) painted = false;
                         }
-                        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-                        const messageHit = document.elementFromPoint(
-                          messageRect.x + messageRect.width / 2, messageRect.y + messageRect.height / 2);
+                        // Toasts are intentionally click-through. Include the painted alert in
+                        // hit testing only for this measurement, without raising its z-index.
+                        const hitTargets = region && style.pointerEvents === 'none'
+                          ? Array.from(new Set([el, message])) : [];
+                        const originalPointers = hitTargets.map(node => [
+                          node.style.getPropertyValue('pointer-events'),
+                          node.style.getPropertyPriority('pointer-events'),
+                        ]);
+                        let hit, messageHit;
+                        try {
+                          hitTargets.forEach(node => node.style.setProperty('pointer-events', 'auto'));
+                          hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+                          messageHit = document.elementFromPoint(
+                            messageRect.x + messageRect.width / 2, messageRect.y + messageRect.height / 2);
+                        } finally {
+                          hitTargets.forEach((node, index) => {
+                            const [value, priority] = originalPointers[index];
+                            if (value) node.style.setProperty('pointer-events', value, priority);
+                            else node.style.removeProperty('pointer-events');
+                          });
+                        }
                         return {role: el.getAttribute('role'), text: (el.textContent || '').slice(0, 1200),
                           renderedText: (message.innerText || '').slice(0, 1200),
                           painted, unobscured: hit !== null && el.contains(hit) &&
@@ -736,9 +754,20 @@ def run(args) -> None:
                     )
                 )
             )
+            # Force the failure mode reported on Linux, then read the real
+            # system clipboard. This does not simulate a successful write.
+            driver.execute_script("""
+                if (navigator.clipboard) {
+                    Object.defineProperty(navigator.clipboard, 'writeText', {
+                        configurable: true,
+                        value: () => Promise.reject(new DOMException(
+                            'The request is not allowed', 'NotAllowedError')),
+                    });
+                }
+            """)
             local_copy.click()
             # Read only after this test's explicit copy succeeds, inside its private Xvfb display.
-            # No clipboard stubs, browser permission grants, or direct clipboard writes are used.
+            # No browser permissions are granted and the test never writes to X11.
             visible_notice("Copied", "copy-config")
             copied = subprocess.run(
                 [clipboard_reader, "-o", "-selection", "clipboard"],
@@ -842,14 +871,6 @@ def run(args) -> None:
             )
             button("Settings").click()
             button("Quit application").click()
-            checkbox_label = wait.until(
-                ec.element_to_be_clickable(
-                    (By.XPATH, "//label[normalize-space(.)='Quit and stop services?']")
-                )
-            )
-            checkbox_label.click()
-            checkbox = driver.find_element(By.ID, checkbox_label.get_attribute("for"))
-            assert checkbox.is_selected()
             track_owned_processes()
             try:
                 button("Quit").click()

@@ -184,13 +184,28 @@ describe("viewport-anchored operation feedback", () => {
       expect(feedback.closest("main")).toBeNull();
       expect(getComputedStyle(feedback).position).toBe("fixed");
       expect(getComputedStyle(feedback).pointerEvents).toBe("none");
-      expect(getComputedStyle(alert).pointerEvents).toBe("auto");
+      expect(getComputedStyle(alert).pointerEvents).toBe("none");
+      expect(
+        getComputedStyle(
+          within(feedback).getByRole("button", { name: dismiss }),
+        ).pointerEvents,
+      ).toBe("auto");
       expect(Number(getComputedStyle(feedback).zIndex)).toBeLessThan(200);
       expect(document.documentElement.scrollTop).toBe(1100);
       fireEvent.click(within(feedback).getByRole("button", { name: dismiss }));
       expect(screen.queryByRole("region", { name: region })).toBeNull();
     },
   );
+
+  it("disables rollback when the desktop reports no usable previous Core", async () => {
+    snapshot.rollbackAvailable = false;
+    await mount();
+    await openSettings();
+    expect(screen.getByRole("button", { name: "Roll back" })).toBeDisabled();
+    expect(
+      screen.getByText("No previous managed core is available"),
+    ).toBeVisible();
+  });
 
   it("clears the previous outcome on save start, retains a scrolled error, and clears it on retry", async () => {
     await mount();

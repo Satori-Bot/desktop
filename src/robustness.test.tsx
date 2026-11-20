@@ -35,6 +35,7 @@ const count = (command: string) =>
 async function defaultInvoke(command: string, args?: Record<string, unknown>) {
   if (command === "snapshot") return structuredClone(snapshot);
   if (command === "activity") return structuredClone(fixtureCalls);
+  if (command === "validate_workspace_path") return String(args?.path);
   if (command === "logs")
     return { text: "Initial log output\n", cursor: 10, truncated: false };
   if (command === "connection_config") return "private fixture config";
@@ -825,6 +826,7 @@ describe("saved drafts and accessible history", () => {
       <MantineProvider env="test">
         <WorkspaceModal
           workspace={null}
+          workspaceNames={[]}
           coreAvailable
           onInstallCore={vi.fn()}
           onSaved={onSaved}
@@ -840,7 +842,9 @@ describe("saved drafts and accessible history", () => {
     fireEvent.change(screen.getByLabelText("Folder path", { exact: false }), {
       target: { value: "/fixture/new" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Continue" })),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     fireEvent.click(screen.getByRole("button", { name: "Create and start" }));
     expect(count("save_workspace")).toBe(1);
@@ -979,8 +983,18 @@ describe("saved drafts and accessible history", () => {
       opener.focus();
       fireEvent.click(opener);
       const dialog = screen.getByRole("dialog", { name: title });
-      within(dialog).getByRole("checkbox").focus();
-      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+      if (trigger === "Quit application") {
+        expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
+        expect(
+          within(dialog).getByRole("button", { name: "Quit" }),
+        ).toBeEnabled();
+        await tick(20);
+        expect(cancel).toHaveFocus();
+      } else {
+        within(dialog).getByRole("checkbox").focus();
+      }
+      fireEvent.click(cancel);
       await tick(20);
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       expect(opener).toHaveFocus();
@@ -1037,7 +1051,9 @@ describe("saved drafts and accessible history", () => {
     fireEvent.change(screen.getByLabelText("Folder path", { exact: false }), {
       target: { value: "/fixture/created" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Continue" })),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     const restore = vi.spyOn(opener, "focus");
     await act(async () =>

@@ -1,6 +1,9 @@
 export type Language = "en" | "zh";
 const zh: Record<string, string> = {
   "Install core": "安装核心",
+  "First setup needs internet to download the Core and, if needed, Python.":
+    "首次设置需要联网下载核心，并在需要时下载 Python。",
+  "Choose or enter an executable path": "选择或输入可执行文件路径",
   "Core installation required": "需要安装核心",
   "Install Core before creating and starting a workspace.":
     "请先安装核心，再创建并启动工作区。",
@@ -13,6 +16,35 @@ const zh: Record<string, string> = {
   "Local service is not ready. You can copy this configuration, but confirm it is running and healthy before connecting a client.":
     "本地服务尚未就绪。可以复制配置，但连接客户端前请确认工作区已启动且服务正常。",
   "Core readiness check timed out": "核心就绪检查超时",
+  "Current startup output:": "本次启动输出：",
+  "Could not open a fresh runtime log": "无法创建本次运行日志",
+  "Choose a project folder, not your entire home directory":
+    "请选择具体的项目文件夹，不要选择整个用户主目录。",
+  "Choose the installed coding-tools-mcp executable, not another program":
+    "请选择已安装的 coding-tools-mcp 可执行文件，而不是其他程序。",
+  "Port is already in use. Choose another port.":
+    "此端口已被占用，请换一个端口。",
+  "Permission denied for this port. Choose another port.":
+    "没有权限使用此端口，请换一个端口。",
+  "Could not check whether this port is available": "无法检查此端口是否可用：",
+  "Clipboard text is not supported": "剪贴板不支持此文本。",
+  "The system clipboard is unavailable": "系统剪贴板不可用。",
+  "This Core can run tools, but does not record tool-call history. You can still connect and use it.":
+    "此版本不记录工具调用历史，但不影响连接和使用工具。",
+  "The recommended Core 0.5.0 works for connecting and running tools. Tool-call history is not included in this release.":
+    "推荐版本 0.5.0 支持连接和使用工具，本版本不含工具调用历史。",
+  "Not running. Start the workspace to check its connection.":
+    "尚未运行。请启动工作区后检查连接。",
+  "No tool calls recorded yet.": "暂未记录工具调用。",
+  "Core was not found. Open Settings to install the recommended version or choose an existing Core.":
+    "找不到核心。请在设置中安装推荐版本或选择已安装的核心。",
+  "Open installation log folder": "打开安装日志所在文件夹",
+  "View official Core releases": "查看官方核心版本",
+  "Cloudflare installation instructions": "查看 Cloudflare 安装说明",
+  "Cloudflare connector is not installed. Local MCP remains available.":
+    "未安装 Cloudflare 连接器。本地 MCP 仍可用。",
+  "Install the Cloudflare connector before setting up public access.":
+    "请先安装 Cloudflare 连接器，再配置公网访问。",
   "Recent runtime output:": "最近的运行输出：",
   "Public access is not verified. You can copy this configuration, but check the connection before using it.":
     "公网连接尚未验证。可以复制配置，但使用前请先检查连接。",
@@ -240,7 +272,7 @@ const zh: Record<string, string> = {
   "Local service remains available. Fix the tunnel without restarting your tools.":
     "本地服务仍然可用。可以修复隧道，无需重启工具。",
   "Retry tunnel": "重试隧道",
-  "Temporary Quick Tunnel": "临时 Quick Tunnel",
+  "Temporary Quick Tunnel": "临时隧道",
   "This URL changes after a restart. Use a named tunnel for a stable address and browser authentication.":
     "重启后地址会改变。固定地址和浏览器认证请使用命名隧道。",
   "Stable Cloudflare tunnel": "稳定的 Cloudflare 隧道",
@@ -353,6 +385,31 @@ const zh: Record<string, string> = {
   "Connect a client": "连接客户端",
   "Use the local endpoint or copy the client configuration. Public access is optional.":
     "使用本地端点或复制客户端配置。公网访问为可选项。",
+  "Set up a Core before starting a workspace.": "请先配置核心，再启动工作区。",
+  "Install recommended Core": "安装推荐版本",
+  "Choose a Core to start this workspace": "选择用于启动工作区的核心",
+  "Use existing Core": "使用已有核心",
+  "Enter an existing core executable.": "请输入已有核心的可执行文件。",
+  "The selected core executable was not found or is not executable":
+    "找不到所选核心，或文件不可执行。",
+  "Enter an absolute workspace folder path": "请输入工作区目录的绝对路径。",
+  "Choose a project folder, not a filesystem root":
+    "请选择项目目录，而不是磁盘根目录。",
+  "Choose or enter an absolute folder path": "选择或输入绝对目录路径",
+  "Enter a whole port number from 1 to 65535, or leave blank for automatic.":
+    "请输入 1 到 65535 的整数端口，或留空自动选择。",
+  "Leave blank to choose an available port.": "留空时自动选择可用端口。",
+  "A workspace already has this name; choose a different name":
+    "工作区名称已存在，请换一个名称。",
+  "Public discovery check expired; run diagnostics to verify the route.":
+    "公网验证已过期，请运行诊断重新检查。",
+  "Previous checks are stale. Run checks again.":
+    "上次检查已过期，请重新检查。",
+  "Last diagnostics check": "上次诊断检查",
+  Stale: "已过期",
+  "Check public address": "检查公网地址",
+  "Last public discovery check": "上次公网探测",
+  "Public discovery is reachable": "公网探测可达",
   Saved: "已保存",
   "Operation completed": "操作已完成",
   "Working…": "处理中…",

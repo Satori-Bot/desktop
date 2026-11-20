@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, fix/pr-1-qa-followups]
   pull_request:
   workflow_call:
 permissions:
@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+        os: [ubuntu-24.04, macos-latest, macos-15-intel, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -63,7 +63,7 @@ jobs:
       - run: python -m ruff check mcp_desktop_client tests
       - run: python -m unittest discover -s tests -p "test_*.py"
   browser:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -86,7 +86,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+        os: [ubuntu-24.04, macos-latest, macos-15-intel, windows-latest]
         core: [published, event-capable]
         include:
           - core: published
@@ -112,9 +112,19 @@ jobs:
           DESKTOP_EXPECT_ACTIVITY: ${{ matrix.activity }}
           CODING_TOOLS_MCP_TELEMETRY: 'off'
           DO_NOT_TRACK: '1'
-        run: cargo test -p desktop-manager official_core_mcp_acceptance --locked -- --ignored
+          DESKTOP_ACCEPTANCE_LOG_DIR: ${{ runner.temp }}/desktop-core-acceptance
+          RUST_BACKTRACE: '1'
+        run: cargo test -p desktop-manager --test lifecycle official_core_mcp_acceptance --locked -- --ignored --nocapture
+      - name: Preserve Core runtime logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: core-acceptance-logs-${{ matrix.os }}-${{ matrix.label }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/desktop-core-acceptance/*/home/state/*/runtime.log*
+          if-no-files-found: ignore
+          retention-days: 7
   package:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6

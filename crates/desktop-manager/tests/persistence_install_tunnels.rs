@@ -227,6 +227,11 @@ mod mocked_tools {
         let before = fs::read(h.home().join("desktop-v2.json")).unwrap();
         assert!(manager.install_core("0.5.0").is_err());
         assert_eq!(fs::read(h.home().join("desktop-v2.json")).unwrap(), before);
+        assert_eq!(
+            fs::read_dir(h.home().join("cores")).unwrap().count(),
+            0,
+            "failed install left a new environment behind"
+        );
         manager.rollback_core().unwrap();
     }
 
@@ -243,6 +248,11 @@ mod mocked_tools {
             "installer accepted coding-tools-mcp 9.9.9 while claiming verified version 0.5.0"
         );
         assert_eq!(fs::read(h.home().join("desktop-v2.json")).unwrap(), before);
+        assert_eq!(
+            fs::read_dir(h.home().join("cores")).unwrap().count(),
+            0,
+            "failed install left a new environment behind"
+        );
     }
 
     #[test]
@@ -255,6 +265,11 @@ mod mocked_tools {
         fs::rename(&config_path, h.home().join("saved.json")).unwrap();
         fs::create_dir(&config_path).unwrap();
         assert!(manager.install_core("0.5.0").is_err());
+        assert_eq!(
+            fs::read_dir(h.home().join("cores")).unwrap().count(),
+            0,
+            "failed install left a new environment behind"
+        );
         fs::remove_dir(&config_path).unwrap();
         fs::rename(h.home().join("saved.json"), &config_path).unwrap();
         manager

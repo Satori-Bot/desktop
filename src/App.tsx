@@ -41,8 +41,8 @@ import {
   X,
 } from "lucide-react";
 import { api, backendAvailable } from "./api";
-import type { Activity, Settings, Snapshot, Workspace } from "./types";
-import { errorText, isActive } from "./types";
+import type { Activity, Settings, Snapshot, Status, Workspace } from "./types";
+import { errorText, isActive, RECOMMENDED_CORE_VERSION } from "./types";
 import { blockingOperation, isMaintenance } from "./operations";
 import type { Operation } from "./operations";
 import { translator } from "./i18n";
@@ -76,6 +76,30 @@ const navigation = [
   { name: "Diagnostics", icon: Wrench },
   { name: "Settings", icon: Settings2 },
 ] as const;
+// These commands do not change the manager snapshot. In particular, a
+// stalled status read must not delay a local copy or reveal.
+const readOnlyOperations = new Set([
+  "config",
+  "copy-config",
+  "credentials",
+  "open",
+]);
+const lifecycleOperations = new Set([
+  "start",
+  "stop",
+  "restart",
+  "retry-tunnel",
+]);
+
+function isWorkspaceStatus(value: unknown, id: string): value is Status {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "workspaceId" in value &&
+    value.workspaceId === id &&
+    "state" in value
+  );
+}
 export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [selected, setSelected] = useState("");
@@ -110,14 +134,21 @@ export default function App() {
     opened: confirm !== null,
     shouldReturnFocus: !confirmationCompleted.current,
   });
-  const [calls, setCalls] = useState<Activity[]>([]);
-  const [activityError, setActivityError] = useState("");
+  const [activity, setActivity] = useState<{
+    target: string;
+    calls: Activity[];
+    error: string;
+  }>();
   const [menuOpen, setMenuOpen] = useState(false);
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
   const available = backendAvailable();
   const t = translator(snapshot?.settings.language ?? "en");
   const workspace = snapshot?.workspaces.find((w) => w.id === selected);
   const status = snapshot?.statuses.find((s) => s.workspaceId === selected);
+  const activityTarget = JSON.stringify([selected, status?.pid]);
+  const calls = activity?.target === activityTarget ? activity.calls : [];
+  const activityError =
+    activity?.target === activityTarget ? activity.error : "";
   const active = isActive(status);
   const missingCore = snapshot?.coreAvailable === false;
   // A workspace may explicitly select its own official executable.
@@ -197,20 +228,21 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     let activityPending = false;
-    setCalls([]);
-    setActivityError("");
     if (!selected || !available) return;
     const update = async () => {
       if (activityPending) return;
       activityPending = true;
       try {
         const next = await api.activity(selected);
-        if (!cancelled) {
-          setCalls(next);
-          setActivityError("");
-        }
+        if (!cancelled)
+          setActivity({ target: activityTarget, calls: next, error: "" });
       } catch (e) {
-        if (!cancelled) setActivityError(errorText(e));
+        if (!cancelled)
+          setActivity((current) => ({
+            target: activityTarget,
+            calls: current?.target === activityTarget ? current.calls : [],
+            error: errorText(e),
+          }));
       } finally {
         activityPending = false;
       }
@@ -221,7 +253,7 @@ export default function App() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [selected, available, status?.pid]);
+  }, [selected, available, activityTarget]);
   function reportFailure(message: string) {
     // Concurrent operations may both fail. Keep each actionable error visible,
     // even when an older operation finishes after a newer independent action.
@@ -250,10 +282,31 @@ export default function App() {
         ? `${targetName ?? workspaceId}: ${message}`
         : message;
     setFeedback(null);
+    const shouldRefresh = key !== "quit" && !readOnlyOperations.has(key);
     try {
       const result = await fn();
       if (mounted.current) {
-        await refresh(true);
+        if (
+          workspaceId &&
+          lifecycleOperations.has(key) &&
+          isWorkspaceStatus(result, workspaceId)
+        ) {
+          const status = result;
+          setSnapshot((current) =>
+            current?.workspaces.some((item) => item.id === workspaceId)
+              ? {
+                  ...current,
+                  statuses: [
+                    ...current.statuses.filter(
+                      (item) => item.workspaceId !== workspaceId,
+                    ),
+                    status,
+                  ],
+                }
+              : current,
+          );
+        }
+        if (shouldRefresh) await refresh(true);
         if (
           mounted.current &&
           success &&
@@ -271,6 +324,9 @@ export default function App() {
       return result;
     } catch (e) {
       if (mounted.current) {
+        // Some lifecycle operations stop a process or change its port status
+        // before reporting failure. Reconcile even on rejection.
+        if (shouldRefresh) void refresh(true);
         const action = {
           install: "Install version",
           rollback: "Roll back",
@@ -298,7 +354,14 @@ export default function App() {
     const sequence = ++feedbackRequest.current;
     setFeedback(null);
     try {
-      await navigator.clipboard.writeText(value);
+      // Native Linux reports true after taking ownership of the GTK clipboard.
+      // Browser preview uses Web Clipboard, as do the other desktop targets.
+      if (
+        !available ||
+        !navigator.userAgent.includes("Linux") ||
+        (await api.copyText(value)) !== true
+      )
+        await navigator.clipboard.writeText(value);
       if (mounted.current && sequence === feedbackRequest.current)
         setFeedback((current) =>
           current?.kind === "error"
@@ -316,17 +379,28 @@ export default function App() {
     setFeedback(null);
   }
   function openEditor(workspace: Workspace | null) {
-    if (!workspace && missingCore) {
-      navigate("Settings");
-      return;
-    }
     if (!workspace) navigate("Dashboard");
     if (!workspace && workspaceModal === null) return;
     editorSaved.current = false;
     setWorkspaceModal(workspace);
   }
+  async function installRecommendedCore(onError?: (message: string) => void) {
+    await run(
+      "install",
+      async () => {
+        try {
+          return await api.installCore(RECOMMENDED_CORE_VERSION);
+        } catch (error) {
+          if (!onError) throw error;
+          onError(errorText(error));
+          return undefined;
+        }
+      },
+      onError ? undefined : t("Core installation completed"),
+    );
+  }
   function installCore() {
-    navigate("Settings");
+    void installRecommendedCore();
   }
   function openConfirmation(confirmation: Confirmation) {
     confirmationCompleted.current = false;
@@ -407,6 +481,9 @@ export default function App() {
       }
     } else if (confirm?.kind === "quit") {
       await run("quit", api.quit);
+      // The desktop may reject Quit; reveal the operation feedback rather
+      // than leaving it behind the confirmation modal.
+      setConfirm(null);
     }
   }
   return (
@@ -440,7 +517,14 @@ export default function App() {
             data={
               snapshot?.workspaces.map((w) => ({
                 value: w.id,
-                label: w.name,
+                label: snapshot.workspaces.some(
+                  (other) =>
+                    other.id !== w.id &&
+                    other.name.trim().toLowerCase() ===
+                      w.name.trim().toLowerCase(),
+                )
+                  ? `${w.name} · ${w.path} (${w.id.slice(0, 8)})`
+                  : w.name,
               })) ?? []
             }
             disabled={
@@ -613,10 +697,20 @@ export default function App() {
               icon={<CircleAlert size={18} />}
               title={t("Core installation required")}
             >
-              {t("Install Core before creating and starting a workspace.")}
-              <Button ml="sm" size="xs" onClick={installCore}>
-                {t("Install core")}
-              </Button>
+              {t(
+                "First setup needs internet to download the Core and, if needed, Python.",
+              )}
+              {!workspace && (
+                <Button
+                  ml="sm"
+                  size="xs"
+                  onClick={installCore}
+                  loading={maintenanceBusy === "install"}
+                  disabled={!!maintenanceBusy && maintenanceBusy !== "install"}
+                >
+                  {t("Install core")}
+                </Button>
+              )}
             </Alert>
           )}
           {loading ? (
@@ -631,6 +725,7 @@ export default function App() {
               }
               available={available && !!snapshot}
               coreAvailable={snapshot?.coreAvailable ?? null}
+              rollbackAvailable={snapshot?.rollbackAvailable}
               cloudflaredAvailable={snapshot?.cloudflaredAvailable ?? null}
               run={run}
               busy={settingsBusy}
@@ -667,15 +762,9 @@ export default function App() {
                   leftSection={<Plus size={18} />}
                   rightSection={<ArrowRight size={17} />}
                   disabled={busy || (available && !snapshot)}
-                  onClick={() =>
-                    missingCore ? installCore() : openEditor(null)
-                  }
+                  onClick={() => openEditor(null)}
                 >
-                  {t(
-                    missingCore
-                      ? "Install core"
-                      : "Create your first workspace",
-                  )}
+                  {t("Create your first workspace")}
                 </Button>
               </div>
               <div className="welcome-steps">
@@ -758,8 +847,10 @@ export default function App() {
                         disabled={
                           !!workspaceBusy ||
                           transitional ||
-                          !!status?.portReleasePending
+                          !!status?.portReleasePending ||
+                          (needsCore && !!maintenanceBusy)
                         }
+                        loading={needsCore && maintenanceBusy === "install"}
                         onClick={() =>
                           needsCore
                             ? installCore()
@@ -793,7 +884,11 @@ export default function App() {
                   ) : needsCore ? (
                     <Button
                       leftSection={<Terminal size={16} />}
-                      disabled={!!maintenanceBusy || !available}
+                      loading={maintenanceBusy === "install"}
+                      disabled={
+                        (!!maintenanceBusy && maintenanceBusy !== "install") ||
+                        !available
+                      }
                       onClick={installCore}
                     >
                       {t("Install core")}
@@ -868,7 +963,11 @@ export default function App() {
                         icon: Terminal,
                         label: "Core version",
                         value:
-                          status?.coreVersion || workspace.coreVersion || "—",
+                          (workspace.coreCommand.length
+                            ? status?.localState === "ready" &&
+                              status.coreVersion
+                            : status?.coreVersion || workspace.coreVersion) ||
+                          "—",
                         detail:
                           workspace.permissionMode === "safe"
                             ? "Mode: Safe"
@@ -957,7 +1056,7 @@ export default function App() {
                         title={t("Tool history unavailable")}
                       >
                         {t(
-                          "This core build does not expose tool-call history. Install an event-capable official core and select its executable in Settings. No calls are fabricated.",
+                          "This Core can run tools, but does not record tool-call history. You can still connect and use it.",
                         )}
                       </Alert>
                     )}
@@ -1027,6 +1126,7 @@ export default function App() {
               ) : page === "Diagnostics" ? (
                 <DiagnosticsPage
                   key={workspace.id}
+                  status={status}
                   workspace={workspace}
                   run={runWorkspace}
                   busy={workspaceBusy}
@@ -1059,6 +1159,7 @@ export default function App() {
         >
           <Alert
             className="operation-alert"
+            tabIndex={feedback.kind === "error" ? 0 : undefined}
             color={feedback.kind === "error" ? "red" : "teal"}
             variant="filled"
             icon={
@@ -1082,6 +1183,7 @@ export default function App() {
         <WorkspaceModal
           opened={page !== "Settings"}
           workspace={workspaceModal}
+          workspaceNames={snapshot?.workspaces.map((item) => item.name) ?? []}
           locked={
             !!workspaceModal &&
             isActive(
@@ -1093,7 +1195,8 @@ export default function App() {
           onClose={closeEditor}
           onSaved={saved}
           coreAvailable={!missingCore}
-          onInstallCore={installCore}
+          onInstallCore={installRecommendedCore}
+          installBusy={maintenanceBusy}
           t={t}
         />
       )}{" "}
@@ -1110,6 +1213,7 @@ export default function App() {
               : "All running workspaces will be stopped.",
           )}`}
           label={t(confirm.kind === "delete" ? "Remove" : "Quit")}
+          requiresAcknowledgement={confirm.kind === "delete"}
           onConfirm={() => void confirmed()}
           onClose={() => setConfirm(null)}
           busy={

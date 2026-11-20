@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useFocusReturn } from "@mantine/hooks";
 import {
   Alert,
@@ -44,7 +44,12 @@ import type {
   Status,
   Workspace,
 } from "../types";
-import { activityOutcome, errorText, isActive } from "../types";
+import {
+  activityOutcome,
+  errorText,
+  isActive,
+  RECOMMENDED_CORE_VERSION,
+} from "../types";
 import { useSavedDraft } from "../hooks/useSavedDraft";
 import { usePageActive } from "../hooks/usePageActive";
 import { SecretInput } from "./SecretInput";
@@ -94,11 +99,38 @@ export function ConnectionsPage({
   onSaved: (w: Workspace) => void;
 }) {
   const pageActive = usePageActive();
-  const [config, setConfig] = useState<{
+  const workspaceKey = JSON.stringify(workspace);
+  const localKey = JSON.stringify([workspaceKey, status?.localEndpoint]);
+  const publicKey = JSON.stringify([workspaceKey, status?.publicEndpoint]);
+  const latestConnection = useRef({
+    workspaceKey,
+    localKey,
+    publicKey,
+    status,
+    t,
+  });
+  useLayoutEffect(() => {
+    latestConnection.current = { workspaceKey, localKey, publicKey, status, t };
+  }, [workspaceKey, localKey, publicKey, status, t]);
+  const [shownConfig, setConfig] = useState<{
     text: string;
     isPublic: boolean;
+    key: string;
   } | null>(null);
-  const [credentials, setCredentials] = useState<AuthDetails | null>(null);
+  const [shownCredentials, setCredentials] = useState<{
+    value: AuthDetails;
+    key: string;
+  } | null>(null);
+  const config =
+    shownConfig?.key === (shownConfig?.isPublic ? publicKey : localKey)
+      ? shownConfig
+      : null;
+  const credentials =
+    shownCredentials?.key === workspaceKey ? shownCredentials.value : null;
+  useEffect(() => {
+    if (shownConfig && !config) setConfig(null);
+    if (shownCredentials && !credentials) setCredentials(null);
+  }, [shownConfig, config, shownCredentials, credentials]);
   const [tunnelName, setTunnelName] = useState(
     workspace.tunnelName ||
       workspace.name.replace(/[^a-zA-Z0-9-]/g, "-").toLowerCase(),
@@ -120,24 +152,40 @@ export function ConnectionsPage({
   const [validation, setValidation] = useState("");
   const active = isActive(status);
   const setupBusy = busy || maintenanceBusy;
-  async function copyConfig(text: string, isPublic: boolean) {
-    const warning = configWarning(status, isPublic, t);
-    await onCopy(text, [t("Copied"), warning].filter(Boolean).join(" "));
-  }
+  const canCheckPublic = workspace.access === "frp" || !!status?.publicEndpoint;
   async function showConfig(isPublic: boolean, copyOnly = false) {
+    const key = isPublic ? publicKey : localKey;
     const result = await run(copyOnly ? "copy-config" : "config", () =>
       api.connectionConfig(workspace.id, isPublic),
     );
-    if (pageActive.current && result !== undefined) {
-      if (copyOnly) await copyConfig(result, isPublic);
-      else setConfig({ text: result, isPublic });
+    const latest = latestConnection.current;
+    if (
+      pageActive.current &&
+      result !== undefined &&
+      key === (isPublic ? latest.publicKey : latest.localKey)
+    ) {
+      if (copyOnly) {
+        const warning = configWarning(latest.status, isPublic, latest.t);
+        await onCopy(
+          result,
+          [latest.t("Copied"), warning].filter(Boolean).join(" "),
+        );
+      } else {
+        setConfig({ text: result, isPublic, key });
+      }
     }
   }
   async function showCredentials() {
     const result = await run("credentials", () =>
       api.authDetails(workspace.id),
     );
-    if (pageActive.current && result) setCredentials(result);
+    if (
+      pageActive.current &&
+      result &&
+      workspaceKey === latestConnection.current.workspaceKey
+    ) {
+      setCredentials({ value: result, key: workspaceKey });
+    }
   }
   function requestTunnel() {
     if (
@@ -258,15 +306,49 @@ export function ConnectionsPage({
                 color="orange"
                 variant="light"
                 disabled={!!busy || status?.state !== "running"}
-                loading={busy === "retry-tunnel"}
-                onClick={() =>
-                  void run("retry-tunnel", () => api.retryTunnel(workspace.id))
+                loading={
+                  busy === (canCheckPublic ? "diagnose" : "retry-tunnel")
                 }
+                onClick={() => {
+                  if (canCheckPublic) {
+                    void run(
+                      "diagnose",
+                      () => api.checkPublicRoute(workspace.id),
+                      t("Public discovery is reachable"),
+                    );
+                  } else {
+                    void run("retry-tunnel", () =>
+                      api.retryTunnel(workspace.id),
+                    );
+                  }
+                }}
               >
-                {t("Retry tunnel")}
+                {t(canCheckPublic ? "Check public address" : "Retry tunnel")}
               </Button>
             )}
+            {canCheckPublic &&
+              workspace.access !== "frp" &&
+              status?.publicState === "error" && (
+                <Button
+                  size="xs"
+                  variant="subtle"
+                  disabled={!!busy}
+                  onClick={() =>
+                    void run("retry-tunnel", () =>
+                      api.retryTunnel(workspace.id),
+                    )
+                  }
+                >
+                  {t("Retry tunnel")}
+                </Button>
+              )}
           </Group>
+          {status?.publicCheckedAt && (
+            <Text c="dimmed" size="xs" mt="xs">
+              {t("Last public discovery check")}:{" "}
+              {new Date(status.publicCheckedAt).toLocaleString()}
+            </Text>
+          )}
           {status?.publicEndpoint && configWarning(status, true, t) && (
             <Alert color="yellow" mt="sm">
               {configWarning(status, true, t)}
@@ -482,9 +564,9 @@ export function ConnectionsPage({
           </Code>
           <Button
             leftSection={<Clipboard size={15} />}
-            onClick={() =>
-              config && void copyConfig(config.text, config.isPublic)
-            }
+            loading={busy === "copy-config"}
+            disabled={!!busy && busy !== "copy-config"}
+            onClick={() => config && void showConfig(config.isPublic, true)}
           >
             {t("Copy config")}
           </Button>
@@ -577,7 +659,7 @@ export function ActivityPage({
           icon={<AlertCircle size={18} />}
         >
           {t(
-            "This core build does not expose tool-call history. Install an event-capable official core and select its executable in Settings. No calls are fabricated.",
+            "This Core can run tools, but does not record tool-call history. You can still connect and use it.",
           )}
           {status.activityMessage && (
             <Text size="xs" mt="xs">
@@ -634,16 +716,33 @@ export function ActivityPage({
 }
 export function DiagnosticsPage({
   workspace,
+  status,
   run,
   busy,
   t,
 }: {
   workspace: Workspace;
+  status?: Status;
   run: RunAction;
   busy: string;
   t: Translate;
 }) {
-  const [checks, setChecks] = useState<Diagnostic[] | null>(null);
+  const signature = JSON.stringify([
+    workspace,
+    status?.pid,
+    status?.state,
+    status?.localState,
+    status?.publicEndpoint,
+  ]);
+  const [lastCheck, setLastCheck] = useState<{
+    rows: Diagnostic[];
+    signature: string;
+    at: number;
+  } | null>(null);
+  const checks = lastCheck?.rows ?? null;
+  const stale =
+    lastCheck !== null &&
+    (signature !== lastCheck.signature || Date.now() - lastCheck.at >= 300_000);
   const [kind, setKind] = useState<"runtime" | "tunnel">("runtime");
   const [logs, setLogs] = useState("");
   const cursor = useRef(0);
@@ -702,7 +801,7 @@ export function DiagnosticsPage({
   }, [kind, workspace.id]);
   async function diagnose() {
     const result = await run("diagnose", () => api.diagnose(workspace.id));
-    if (result) setChecks(result);
+    if (result) setLastCheck({ rows: result, signature, at: Date.now() });
   }
   async function exportReport() {
     await run(
@@ -764,10 +863,23 @@ export function DiagnosticsPage({
           />
         ) : (
           <div className="diagnostic-list">
+            {lastCheck && (
+              <Text size="sm" c={stale ? "yellow" : "dimmed"}>
+                {t(
+                  stale
+                    ? "Previous checks are stale. Run checks again."
+                    : "Last diagnostics check",
+                )}
+                {": "}
+                {new Date(lastCheck.at).toLocaleString()}
+              </Text>
+            )}
             {checks.map((item, index) => (
               <div key={`${item.name}-${index}`} className="diagnostic-row">
-                <div className={`diagnostic-icon ${item.level}`}>
-                  {item.level === "ok" ? (
+                <div
+                  className={`diagnostic-icon ${stale ? "warning" : item.level}`}
+                >
+                  {!stale && item.level === "ok" ? (
                     <CheckCircle2 size={19} />
                   ) : (
                     <AlertCircle size={19} />
@@ -784,20 +896,24 @@ export function DiagnosticsPage({
                 <Badge
                   ml="auto"
                   color={
-                    item.level === "ok"
-                      ? "teal"
-                      : item.level === "error"
-                        ? "red"
-                        : "yellow"
+                    stale
+                      ? "gray"
+                      : item.level === "ok"
+                        ? "teal"
+                        : item.level === "error"
+                          ? "red"
+                          : "yellow"
                   }
                   variant="light"
                 >
                   {t(
-                    item.level === "ok"
-                      ? "Ready"
-                      : item.level === "error"
-                        ? "Error"
-                        : "Warning",
+                    stale
+                      ? "Stale"
+                      : item.level === "ok"
+                        ? "Ready"
+                        : item.level === "error"
+                          ? "Error"
+                          : "Warning",
                   )}
                 </Badge>
               </div>
@@ -855,6 +971,7 @@ export function SettingsPage({
   settings,
   available,
   coreAvailable,
+  rollbackAvailable,
   cloudflaredAvailable,
   run,
   busy,
@@ -873,6 +990,7 @@ export function SettingsPage({
   settings: Settings;
   available: boolean;
   coreAvailable: boolean | null;
+  rollbackAvailable?: boolean;
   cloudflaredAvailable: boolean | null;
   run: RunAction;
   busy: string;
@@ -907,8 +1025,8 @@ export function SettingsPage({
     );
     if (pageActive.current && result) setDraft(result);
   }
-  async function install() {
-    const exactVersion = version.trim();
+  async function install(value = version) {
+    const exactVersion = value.trim();
     // Match the manager's published-version contract before invoking IPC.
     if (!/^\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?$/.test(exactVersion)) {
       setValidation(t("Enter an exact version, for example 0.5.0."));
@@ -1028,13 +1146,20 @@ export function SettingsPage({
         </Group>
         <Alert color="yellow" mb="lg">
           {t(
-            "Published core 0.5.0 supports launch and connections, but does not expose per-tool-call history. History requires an event-capable official core.",
+            "The recommended Core 0.5.0 works for connecting and running tools. Tool-call history is not included in this release.",
           )}
         </Alert>
+        <Button
+          mb="md"
+          onClick={() => void install(RECOMMENDED_CORE_VERSION)}
+          loading={maintenanceBusy === "install"}
+          disabled={!available || !!maintenanceBusy}
+        >
+          {t("Install recommended Core")} ({RECOMMENDED_CORE_VERSION})
+        </Button>
         <div className="core-install">
           <TextInput
             label={t("Version to install")}
-            autoFocus={coreAvailable === false}
             placeholder={t("For example, 0.5.0")}
             description={t(
               "Enter a published version. The example is not filled in automatically.",
@@ -1071,14 +1196,42 @@ export function SettingsPage({
             loading={maintenanceBusy === "rollback"}
             disabled={
               !available ||
+              rollbackAvailable === false ||
               (!!maintenanceBusy && maintenanceBusy !== "rollback")
             }
           >
             {t("Roll back")}
           </Button>
         </div>
+        {rollbackAvailable === false && (
+          <Text c="dimmed" size="xs" mt="sm">
+            {t("No previous managed core is available")}
+          </Text>
+        )}
+        {available && (
+          <Group gap="xs" mt="xs">
+            <Button
+              variant="subtle"
+              size="xs"
+              onClick={() => void run("open-install-logs", api.openInstallLogs)}
+            >
+              {t("Open installation log folder")}
+            </Button>
+            <Button
+              variant="subtle"
+              size="xs"
+              onClick={() =>
+                void run("open-core-releases", () => api.openSetupHelp("core"))
+              }
+            >
+              {t("View official Core releases")}
+            </Button>
+          </Group>
+        )}
         <Text c="dimmed" size="xs" mt="md">
-          {t("Install requires uv and network access.")}
+          {t(
+            "First setup needs internet to download the Core and, if needed, Python.",
+          )}
         </Text>
         <Text c="dimmed" size="xs" mt={5}>
           {t(
@@ -1090,7 +1243,7 @@ export function SettingsPage({
             {t(output)}
           </Alert>
         )}
-        {(coreAvailable || workspace?.coreCommand.length) && (
+        {available && (
           <Button mt="md" onClick={onContinue} disabled={anyBusy}>
             {t(workspace ? "Back to workspace" : "Create your first workspace")}
           </Button>
@@ -1111,6 +1264,19 @@ export function SettingsPage({
             )}
           </Badge>
         </Group>
+        {available && cloudflaredAvailable === false && (
+          <Button
+            variant="subtle"
+            size="xs"
+            onClick={() =>
+              void run("open-cloudflare-help", () =>
+                api.openSetupHelp("cloudflare"),
+              )
+            }
+          >
+            {t("Cloudflare installation instructions")}
+          </Button>
+        )}
       </Paper>
       {workspace && (
         <RuntimeOverride
@@ -1180,6 +1346,7 @@ function RuntimeOverride({
     await run(
       "save-runtime",
       async () => {
+        await api.validateCoreOverride(workspace.path, command);
         const saved = await api.saveWorkspace({
           ...workspace,
           coreCommand: command,
@@ -1219,15 +1386,38 @@ function RuntimeOverride({
       <Stack gap="md">
         <TextInput
           label={t("Executable path")}
-          placeholder="/path/to/venv/bin/coding-tools-mcp"
+          placeholder={t("Choose or enter an executable path")}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
           value={executable}
           onChange={(event) =>
             setDraft({ ...draft, executable: event.currentTarget.value })
           }
           disabled={active || !!busy}
+          rightSectionWidth={100}
+          rightSection={
+            <Button
+              size="compact-xs"
+              variant="light"
+              disabled={active || !!busy}
+              onClick={() =>
+                void run("browse-core", async () => {
+                  const path = await api.pickCoreExecutable();
+                  if (path && pageActive.current)
+                    setDraft((current) => ({ ...current, executable: path }));
+                })
+              }
+            >
+              {t("Browse")}
+            </Button>
+          }
         />
         <Textarea
           label={t("Arguments (one per line)")}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
           value={argumentsText}
           onChange={(event) =>
             setDraft({ ...draft, argumentsText: event.currentTarget.value })
