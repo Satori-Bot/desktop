@@ -139,7 +139,9 @@ fn manager() -> (MutexGuard<'static, ()>, tempfile::TempDir, Arc<Manager>) {
     manager_in(tempfile::tempdir().unwrap())
 }
 
-fn manager_in(dir: tempfile::TempDir) -> (MutexGuard<'static, ()>, tempfile::TempDir, Arc<Manager>) {
+fn manager_in(
+    dir: tempfile::TempDir,
+) -> (MutexGuard<'static, ()>, tempfile::TempDir, Arc<Manager>) {
     let guard = lifecycle_fixture_lock();
     #[cfg(unix)]
     let m = Manager::open_supervised(
@@ -412,7 +414,10 @@ fn official_core_mcp_acceptance() {
     // and expose only the capabilities of the newly launched core.
     eprintln!("[core acceptance] restart core");
     let restarted = m.restart(&w.id).unwrap();
-    eprintln!("[core acceptance] restart returned {}", restarted.local_state);
+    eprintln!(
+        "[core acceptance] restart returned {}",
+        restarted.local_state
+    );
     assert_eq!(restarted.local_state, "ready");
     assert_eq!(
         restarted.activity_state,
